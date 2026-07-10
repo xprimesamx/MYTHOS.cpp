@@ -1,0 +1,10 @@
+#pragma once
+
+#define OIL_VERSION_MAJOR 0
+#define OIL_VERSION_MINOR 1
+#define OIL_VERSION_PATCH 0
+
+#cmakedefine OIL_AVX2
+#cmakedefine OIL_AVX512
+#cmakedefine OIL_NEON
+#cmakedefine OIL_DEBUG

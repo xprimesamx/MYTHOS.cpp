@@ -1,0 +1,332 @@
+#include "oil/codebook.h"
+#include "oil/random.h"
+
+#include <cstring>
+#include <cmath>
+#include <algorithm>
+#include <limits>
+#include <vector>
+
+namespace oil {
+
+// ===========================================================================
+// IEEE 754 FP16 <-> FP32 conversion
+// ===========================================================================
+
+uint16_t CodebookOIL4::float_to_half(float f) {
+    uint32_t u;
+    std::memcpy(&u, &f, sizeof(u));
+    uint16_t sign = (uint16_t)((u >> 16) & 0x8000);
+    int32_t exp = (int32_t)((u >> 23) & 0xFF) - 127 + 15;
+    uint32_t mant = u & 0x007FFFFF;
+
+    if (exp <= 0) {
+        // Denormal or zero
+        if (exp < -10) return sign;
+        mant = (mant | 0x00800000) >> (1 - exp);
+        return sign | (uint16_t)(mant >> 13);
+    }
+    if (exp >= 31) {
+        // Infinity or NaN
+        return sign | 0x7C00 | (mant != 0 ? 0x0200 : 0);
+    }
+    return sign | ((uint16_t)exp << 10) | (uint16_t)(mant >> 13);
+}
+
+float CodebookOIL4::half_to_float(uint16_t h) {
+    uint16_t sign = h & 0x8000;
+    int32_t exp = (h >> 10) & 0x1F;
+    uint16_t mant = h & 0x03FF;
+
+    uint32_t f;
+    if (exp == 0) {
+        // Denormal or zero
+        if (mant == 0) {
+            f = sign << 16;
+        } else {
+            // Normalize
+            int shift = 10;
+            while ((mant & 0x0400) == 0) { mant <<= 1; shift--; }
+            exp = 1 - shift + 127 - 15;
+            mant = (mant & 0x03FF) << (23 - 10);
+            f = ((uint32_t)sign << 16) | ((uint32_t)exp << 23) | mant;
+        }
+    } else if (exp == 31) {
+        // Infinity or NaN
+        f = ((uint32_t)sign << 16) | 0x7F800000 | ((uint32_t)mant << 13);
+    } else {
+        f = ((uint32_t)sign << 16) | (((uint32_t)(exp - 15 + 127)) << 23) | ((uint32_t)mant << 13);
+    }
+
+    float result;
+    std::memcpy(&result, &f, sizeof(result));
+    return result;
+}
+
+// ===========================================================================
+// CodebookOIL8
+// ===========================================================================
+
+void CodebookOIL8::train(const float* data, size_t count) {
+    if (count == 0) return;
+
+    RNG rng(42);
+
+    // Initialize centroids from random data points
+    size_t init_count = std::min((size_t)SIZE, count);
+    std::vector<size_t> indices(count);
+    for (size_t i = 0; i < count; i++) indices[i] = i;
+
+    // Fisher-Yates shuffle first init_count elements
+    for (size_t i = count; i > 1 && init_count < count; i--) {
+        size_t j = (size_t)rng.uniform_int(0, (int)i - 1);
+        std::swap(indices[i - 1], indices[j]);
+    }
+
+    for (int c = 0; c < (int)init_count; c++) {
+        centroids[c] = data[indices[c]];
+    }
+    for (int c = (int)init_count; c < SIZE; c++) {
+        centroids[c] = data[0];
+    }
+
+    // k-means, up to 20 iterations
+    std::vector<uint8_t> assign(count);
+    std::vector<double> sums(SIZE);
+    std::vector<int> counts(SIZE);
+
+    for (int iter = 0; iter < 20; iter++) {
+        // Assignment step
+        for (size_t i = 0; i < count; i++) {
+            float best_dist = std::numeric_limits<float>::max();
+            uint8_t best_c = 0;
+            for (int c = 0; c < SIZE; c++) {
+                float d = data[i] - centroids[c];
+                float dist = d * d;
+                if (dist < best_dist) {
+                    best_dist = dist;
+                    best_c = (uint8_t)c;
+                }
+            }
+            assign[i] = best_c;
+        }
+
+        // Update step
+        std::fill(sums.begin(), sums.end(), 0.0);
+        std::fill(counts.begin(), counts.end(), 0);
+
+        for (size_t i = 0; i < count; i++) {
+            uint8_t c = assign[i];
+            sums[c] += data[i];
+            counts[c]++;
+        }
+
+        bool changed = false;
+        for (int c = 0; c < SIZE; c++) {
+            if (counts[c] > 0) {
+                float new_val = (float)(sums[c] / (double)counts[c]);
+                if (std::abs(new_val - centroids[c]) > 1e-7f) changed = true;
+                centroids[c] = new_val;
+            }
+        }
+
+        if (!changed) break;
+    }
+}
+
+void CodebookOIL8::ema_update(const float* data, const uint8_t* assign, size_t count, float lr) {
+    if (count == 0 || lr <= 0.0f) return;
+
+    std::vector<double> sums(SIZE, 0.0);
+    std::vector<int> counts(SIZE, 0);
+
+    for (size_t i = 0; i < count; i++) {
+        uint8_t c = assign[i];
+        sums[c] += data[i];
+        counts[c]++;
+    }
+
+    for (int c = 0; c < SIZE; c++) {
+        if (counts[c] > 0) {
+            float mean = (float)(sums[c] / (double)counts[c]);
+            centroids[c] = (1.0f - lr) * centroids[c] + lr * mean;
+        }
+    }
+}
+
+uint8_t CodebookOIL8::quantize(float val) const {
+    uint8_t best = 0;
+    float best_dist = std::numeric_limits<float>::max();
+    for (int i = 0; i < SIZE; i++) {
+        float d = val - centroids[i];
+        float dist = d * d;
+        if (dist < best_dist) {
+            best_dist = dist;
+            best = (uint8_t)i;
+        }
+    }
+    return best;
+}
+
+float CodebookOIL8::dequantize(uint8_t idx) const {
+    return centroids[idx];
+}
+
+size_t CodebookOIL8::serialized_size() const {
+    return sizeof(uint32_t) + SIZE * sizeof(float);
+}
+
+size_t CodebookOIL8::serialize(uint8_t* dst) const {
+    uint32_t magic = 0x4F494C38; // "OIL8"
+    std::memcpy(dst, &magic, sizeof(magic));
+    std::memcpy(dst + sizeof(magic), centroids, SIZE * sizeof(float));
+    return serialized_size();
+}
+
+CodebookOIL8 CodebookOIL8::deserialize(const uint8_t* src, size_t& offset) {
+    CodebookOIL8 cb;
+    uint32_t magic;
+    std::memcpy(&magic, src + offset, sizeof(magic));
+    offset += sizeof(magic);
+    (void)magic;
+    std::memcpy(cb.centroids, src + offset, SIZE * sizeof(float));
+    offset += SIZE * sizeof(float);
+    return cb;
+}
+
+// ===========================================================================
+// CodebookOIL4
+// ===========================================================================
+
+void CodebookOIL4::train(const float* data, size_t count) {
+    if (count == 0) return;
+
+    RNG rng(42);
+
+    // Initialize centroids from random data points
+    size_t init_count = std::min((size_t)SIZE, count);
+    std::vector<size_t> indices(count);
+    for (size_t i = 0; i < count; i++) indices[i] = i;
+
+    for (size_t i = count; i > 1 && init_count < count; i--) {
+        size_t j = (size_t)rng.uniform_int(0, (int)i - 1);
+        std::swap(indices[i - 1], indices[j]);
+    }
+
+    std::vector<float> tmp_centroids(SIZE);
+    for (int c = 0; c < (int)init_count; c++) {
+        tmp_centroids[c] = data[indices[c]];
+    }
+    for (int c = (int)init_count; c < SIZE; c++) {
+        tmp_centroids[c] = data[0];
+    }
+
+    std::vector<uint8_t> assign(count);
+    std::vector<double> sums(SIZE);
+    std::vector<int> counts(SIZE);
+
+    for (int iter = 0; iter < 20; iter++) {
+        for (size_t i = 0; i < count; i++) {
+            float best_dist = std::numeric_limits<float>::max();
+            uint8_t best_c = 0;
+            for (int c = 0; c < SIZE; c++) {
+                float d = data[i] - tmp_centroids[c];
+                float dist = d * d;
+                if (dist < best_dist) {
+                    best_dist = dist;
+                    best_c = (uint8_t)c;
+                }
+            }
+            assign[i] = best_c;
+        }
+
+        std::fill(sums.begin(), sums.end(), 0.0);
+        std::fill(counts.begin(), counts.end(), 0);
+
+        for (size_t i = 0; i < count; i++) {
+            uint8_t c = assign[i];
+            sums[c] += data[i];
+            counts[c]++;
+        }
+
+        bool changed = false;
+        for (int c = 0; c < SIZE; c++) {
+            if (counts[c] > 0) {
+                float new_val = (float)(sums[c] / (double)counts[c]);
+                if (std::abs(new_val - tmp_centroids[c]) > 1e-7f) changed = true;
+                tmp_centroids[c] = new_val;
+            }
+        }
+
+        if (!changed) break;
+    }
+
+    // Store as FP16
+    for (int c = 0; c < SIZE; c++) {
+        centroids[c] = float_to_half(tmp_centroids[c]);
+    }
+}
+
+void CodebookOIL4::ema_update(const float* data, const uint8_t* assign, size_t count, float lr) {
+    if (count == 0 || lr <= 0.0f) return;
+
+    std::vector<double> sums(SIZE, 0.0);
+    std::vector<int> counts(SIZE, 0);
+
+    for (size_t i = 0; i < count; i++) {
+        uint8_t c = assign[i];
+        sums[c] += data[i];
+        counts[c]++;
+    }
+
+    for (int c = 0; c < SIZE; c++) {
+        if (counts[c] > 0) {
+            float mean = (float)(sums[c] / (double)counts[c]);
+            float cur = half_to_float(centroids[c]);
+            float updated = (1.0f - lr) * cur + lr * mean;
+            centroids[c] = float_to_half(updated);
+        }
+    }
+}
+
+uint8_t CodebookOIL4::quantize(float val) const {
+    uint8_t best = 0;
+    float best_dist = std::numeric_limits<float>::max();
+    for (int i = 0; i < SIZE; i++) {
+        float d = val - half_to_float(centroids[i]);
+        float dist = d * d;
+        if (dist < best_dist) {
+            best_dist = dist;
+            best = (uint8_t)i;
+        }
+    }
+    return best;
+}
+
+float CodebookOIL4::dequantize(uint8_t idx) const {
+    return half_to_float(centroids[idx]);
+}
+
+size_t CodebookOIL4::serialized_size() const {
+    return sizeof(uint32_t) + SIZE * sizeof(uint16_t);
+}
+
+size_t CodebookOIL4::serialize(uint8_t* dst) const {
+    uint32_t magic = 0x4F494C34; // "OIL4"
+    std::memcpy(dst, &magic, sizeof(magic));
+    std::memcpy(dst + sizeof(magic), centroids, SIZE * sizeof(uint16_t));
+    return serialized_size();
+}
+
+CodebookOIL4 CodebookOIL4::deserialize(const uint8_t* src, size_t& offset) {
+    CodebookOIL4 cb;
+    uint32_t magic;
+    std::memcpy(&magic, src + offset, sizeof(magic));
+    offset += sizeof(magic);
+    (void)magic;
+    std::memcpy(cb.centroids, src + offset, SIZE * sizeof(uint16_t));
+    offset += SIZE * sizeof(uint16_t);
+    return cb;
+}
+
+} // namespace oil

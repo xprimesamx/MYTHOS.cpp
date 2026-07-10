@@ -1,0 +1,55 @@
+if(CMAKE_CXX_COMPILER_ID MATCHES "Clang")
+  message(STATUS "COMPILER: Clang ${CMAKE_CXX_COMPILER_VERSION}")
+
+  add_compile_options(-Wall -Wextra -Wpedantic -Wno-unused-parameter -Wno-unused-variable -Wno-unsafe-buffer-usage
+    -D_FORTIFY_SOURCE=0 -Wno-old-style-cast -fno-stack-protector /GS-)
+
+  if(OIL_SANITIZE)
+    add_compile_options(-fsanitize=address,undefined -fno-omit-frame-pointer)
+    add_link_options(-fsanitize=address,undefined)
+  endif()
+
+  if(CMAKE_BUILD_TYPE STREQUAL "Release")
+    add_compile_options(-O3 -DNDEBUG)
+  elseif(CMAKE_BUILD_TYPE STREQUAL "Debug")
+    add_compile_options(-O0 -g -DOIL_DEBUG)
+  else()
+    add_compile_options(-O2)
+  endif()
+
+  if(OIL_AVX2)
+    add_compile_options(-mavx2 -mavx -mbmi2 -mfma)
+  endif()
+  if(OIL_AVX512)
+    add_compile_options(-mavx512f -mavx512bw -mavx512vl)
+  endif()
+
+elseif(CMAKE_CXX_COMPILER_ID MATCHES "GNU")
+  message(STATUS "COMPILER: GCC ${CMAKE_CXX_COMPILER_VERSION}")
+  add_compile_options(-Wall -Wextra -Wpedantic -Wno-unused-parameter)
+
+  if(OIL_SANITIZE)
+    add_compile_options(-fsanitize=address,undefined -fno-omit-frame-pointer)
+    add_link_options(-fsanitize=address,undefined)
+  endif()
+
+  if(CMAKE_BUILD_TYPE STREQUAL "Release")
+    add_compile_options(-O3 -DNDEBUG -march=native)
+  elseif(CMAKE_BUILD_TYPE STREQUAL "Debug")
+    add_compile_options(-O0 -g -DOIL_DEBUG)
+  endif()
+
+  if(OIL_AVX2)
+    add_compile_options(-mavx2 -mavx -mbmi2 -mfma)
+  endif()
+
+elseif(CMAKE_CXX_COMPILER_ID MATCHES "MSVC")
+  message(STATUS "COMPILER: MSVC")
+  add_compile_options(/W3 /utf-8)
+
+  if(CMAKE_BUILD_TYPE STREQUAL "Release")
+    add_compile_options(/O2 /DNDEBUG)
+  elseif(CMAKE_BUILD_TYPE STREQUAL "Debug")
+    add_compile_options(/Od /Zi /DOIL_DEBUG)
+  endif()
+endif()

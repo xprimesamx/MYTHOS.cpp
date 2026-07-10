@@ -1,0 +1,28 @@
+# Build
+build/
+*.exe
+*.o
+*.obj
+*.pdb
+*.ilk
+*.dll
+*.lib
+*.exp
+
+# IDE
+.vs/
+.idea/
+.vscode/
+.claude/
+
+# Temp & OS
+__pycache__/
+*.pyc
+*.log
+*.tmp
+*.swp
+.DS_Store
+Thumbs.db
+
+# Template artifacts (unused)
+.bitnet/

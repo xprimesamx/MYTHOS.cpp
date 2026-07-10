@@ -1,0 +1,47 @@
+#pragma once
+#include "oil/types.h"
+#include "oil/tensor.h"
+#include "oil/transformer.h"
+#include "oil/kv_cache.h"
+#include "oil/oil_format.h"
+#include <vector>
+#include <memory>
+#include <string>
+
+namespace oil {
+
+class Model {
+public:
+    virtual ~Model() = default;
+    
+    virtual Tensor forward(const Tensor& input_ids, const Tensor& positions) = 0;
+    virtual void load(const std::string& oil_path);
+    virtual void save(const std::string& oil_path) const;
+    virtual int64_t param_count() const = 0;
+    virtual int64_t vocab_size() const = 0;
+    
+    TransformerConfig config;
+};
+
+class DenseModel : public Model {
+public:
+    DenseModel() = default;
+    explicit DenseModel(const TransformerConfig& cfg);
+    
+    Tensor forward(const Tensor& input_ids, const Tensor& positions) override;
+    void load(const std::string& oil_path) override;
+    void save(const std::string& oil_path) const override;
+    int64_t param_count() const override;
+    int64_t vocab_size() const override;
+    
+    // Individual components (public for training access)
+    std::unique_ptr<Embedding> tok_embeddings;
+    std::vector<std::unique_ptr<TransformerBlock>> layers;
+    std::unique_ptr<RMSNorm> norm;
+    std::unique_ptr<Linear> lm_head;
+    
+private:
+    void build_layers();
+};
+
+} // namespace oil
