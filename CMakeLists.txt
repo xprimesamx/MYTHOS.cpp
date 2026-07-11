@@ -90,34 +90,56 @@ add_library(oil_trainer
 target_include_directories(oil_trainer PUBLIC include)
 target_link_libraries(oil_trainer PUBLIC oil_model oil_inference oil_tokenizer)
 
-add_library(oil_engine INFERENCE-ENGINE/inference.cpp INFERENCE-ENGINE/stream.cpp)
-target_include_directories(oil_engine PUBLIC include INFERENCE-ENGINE)
+add_library(oil_engine engines/inference/inference.cpp engines/inference/stream.cpp)
+target_include_directories(oil_engine PUBLIC include engines/inference)
 target_link_libraries(oil_engine PUBLIC oil_inference oil_tokenizer)
 
-add_library(oil_oil8 OIL8/codec.cpp OIL8/quantize.cpp)
-target_include_directories(oil_oil8 PUBLIC include OIL8)
+add_library(oil_oil8 engines/OIL8/codec.cpp engines/OIL8/quantize.cpp)
+target_include_directories(oil_oil8 PUBLIC include engines/OIL8)
 target_link_libraries(oil_oil8 PUBLIC oil_format)
 
-add_library(oil_dense TRAINER-ENGINE/DENSE/trainer.cpp TRAINER-ENGINE/DENSE/dataloader.cpp TRAINER-ENGINE/DENSE/checkpoint.cpp)
-target_include_directories(oil_dense PUBLIC include TRAINER-ENGINE/DENSE)
+add_library(oil_dense
+  engines/trainer/dense/trainer.cpp
+  engines/trainer/dense/dataloader.cpp
+  engines/trainer/dense/checkpoint.cpp
+)
+target_include_directories(oil_dense PUBLIC include engines/trainer/dense)
 target_link_libraries(oil_dense PUBLIC oil_trainer)
 
-add_library(oil_moe TRAINER-ENGINE/MoE/moe.cpp)
-target_include_directories(oil_moe PUBLIC include TRAINER-ENGINE/MoE)
+add_library(oil_moe
+  engines/trainer/moe/moe.cpp
+  engines/trainer/moe/vision/vision.cpp
+)
+target_include_directories(oil_moe PUBLIC include
+  engines/trainer/moe
+  engines/trainer/moe/vision
+  engines/trainer/moe/audio
+  engines/trainer/moe/embeddings
+  engines/trainer/moe/image
+  engines/trainer/moe/ocr
+  engines/trainer/moe/text
+  engines/trainer/moe/video
+)
 target_link_libraries(oil_moe PUBLIC oil_model)
 
 add_library(oil_multimodal
-  TRAINER-ENGINE/MULTIMODEL/TEXT/multimodal_text.cpp
-  TRAINER-ENGINE/MULTIMODEL/IMAGE/vision.cpp
-  TRAINER-ENGINE/MULTIMODEL/AUDIO/audio.cpp
-  TRAINER-ENGINE/MULTIMODEL/VIDEO/video.cpp
-  TRAINER-ENGINE/MULTIMODEL/OCR/ocr.cpp
-  TRAINER-ENGINE/MULTIMODEL/EMBEDDINGS/embeddings.cpp
+  engines/trainer/multimodel/text/multimodal_text.cpp
+  engines/trainer/multimodel/image/vision.cpp
+  engines/trainer/multimodel/audio/audio.cpp
+  engines/trainer/multimodel/video/video.cpp
+  engines/trainer/multimodel/ocr/ocr.cpp
+  engines/trainer/multimodel/embeddings/embeddings.cpp
+  engines/trainer/multimodel/vision/vision.cpp
 )
 target_include_directories(oil_multimodal PUBLIC include
-  TRAINER-ENGINE/MULTIMODEL/TEXT TRAINER-ENGINE/MULTIMODEL/IMAGE
-  TRAINER-ENGINE/MULTIMODEL/AUDIO TRAINER-ENGINE/MULTIMODEL/VIDEO
-  TRAINER-ENGINE/MULTIMODEL/OCR TRAINER-ENGINE/MULTIMODEL/EMBEDDINGS)
+  engines/trainer/multimodel/text
+  engines/trainer/multimodel/image
+  engines/trainer/multimodel/audio
+  engines/trainer/multimodel/video
+  engines/trainer/multimodel/ocr
+  engines/trainer/multimodel/embeddings
+  engines/trainer/multimodel/vision
+)
 target_link_libraries(oil_multimodal PUBLIC oil_model)
 
 if(OIL_BUILD_TOOLS)
