@@ -63,6 +63,7 @@ add_library(oil_model
   src/transformer.cpp
   src/model.cpp
   src/kv_cache.cpp
+  src/autograd.cpp
 )
 target_include_directories(oil_model PUBLIC include)
 target_link_libraries(oil_model PUBLIC oil_kernel)
@@ -81,7 +82,6 @@ target_include_directories(oil_tokenizer PUBLIC include)
 target_link_libraries(oil_tokenizer PUBLIC oil_core)
 
 add_library(oil_trainer
-  src/autograd.cpp
   src/optimizer.cpp
   src/trainer.cpp
   src/ste_quantizer.cpp
@@ -122,6 +122,31 @@ target_include_directories(oil_moe PUBLIC include
 )
 target_link_libraries(oil_moe PUBLIC oil_model)
 
+# DirectX GPU compute library (cross-platform)
+add_library(oil_gpu
+  src/gpu_compute.cpp
+)
+target_include_directories(oil_gpu PUBLIC include)
+target_link_libraries(oil_gpu PUBLIC oil_core)
+if(WIN32)
+  target_link_libraries(oil_gpu PUBLIC d3d12 dxgi d3dcompiler)
+  target_compile_definitions(oil_gpu PRIVATE OIL_USE_DIRECTX)
+endif()
+
+# Hardware backend abstraction
+add_library(oil_backend
+  src/backend.cpp
+)
+target_include_directories(oil_backend PUBLIC include)
+target_link_libraries(oil_backend PUBLIC oil_math oil_gpu)
+
+# All MoE variants
+add_library(oil_moe_variants
+  src/moe_variants.cpp
+)
+target_include_directories(oil_moe_variants PUBLIC include)
+target_link_libraries(oil_moe_variants PUBLIC oil_model oil_backend)
+
 add_library(oil_multimodal
   engines/trainer/multimodel/text/multimodal_text.cpp
   engines/trainer/multimodel/image/vision.cpp
@@ -144,6 +169,7 @@ target_link_libraries(oil_multimodal PUBLIC oil_model)
 
 if(OIL_BUILD_TOOLS)
   add_executable(oil_infer tools/infer.cpp)
+  target_include_directories(oil_infer PRIVATE engines/inference)
   target_link_libraries(oil_infer PRIVATE oil_engine oil_tokenizer)
 
   add_executable(oil_train tools/train.cpp)
@@ -178,6 +204,14 @@ if(OIL_BUILD_TESTS)
   add_oil_test(test_tokenizer tests/test_tokenizer.cpp oil_tokenizer)
   add_oil_test(test_trainer  tests/test_trainer.cpp  oil_trainer oil_inference oil_tokenizer)
   add_oil_test(test_debug    tests/test_debug.cpp    oil_model)
+  add_oil_test(test_all      tests/test_all.cpp      oil_moe_variants oil_backend oil_gpu)
+  # test_gpu needs explicit target definition due to CMake generator limitations
+  add_executable(test_gpu tests/test_gpu.cpp)
+  target_include_directories(test_gpu PRIVATE include)
+  target_link_libraries(test_gpu PRIVATE oil_math)
+  target_link_libraries(test_gpu PRIVATE oil_gpu)
+  target_link_libraries(test_gpu PRIVATE oil_backend)
+  add_test(NAME test_gpu COMMAND test_gpu)
 endif()
 
 if(OIL_BUILD_BENCHMARKS)
@@ -189,4 +223,7 @@ if(OIL_BUILD_BENCHMARKS)
   add_oil_bench(bench_kernels   bench/bench_kernels.cpp   oil_kernel)
   add_oil_bench(bench_inference bench/bench_inference.cpp oil_inference)
   add_oil_bench(bench_quality   bench/bench_quality.cpp   oil_inference)
+
+  # Hardware-probe / auto-select benchmark
+  add_oil_bench(bench_hardware tests/test_bench.cpp oil_backend oil_math)
 endif()

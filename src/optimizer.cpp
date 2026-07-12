@@ -15,7 +15,9 @@ void Optimizer::add_param_group(std::vector<Tensor*> params) {
 void Optimizer::zero_grad() {
     for (auto* p : parameters_) {
         if (p->requires_grad()) {
-            p->set_grad(Tensor());
+            if (p->has_grad()) {
+                p->grad().zero_();
+            }
         }
     }
 }
@@ -68,10 +70,10 @@ void AdamW::step() {
     float lr_adj = lr * std::sqrt(bias_corr2) / bias_corr1;
     
     for (auto* param : parameters_) {
-        if (!param->requires_grad() || param->grad().numel() == 0) continue;
+        if (!param->requires_grad() || !param->has_grad() || param->grad().numel() == 0) continue;
         
         auto& state = state_[param];
-        if (state.m.numel() == 0) {
+        if (!state.m.buffer()) {
             state.m = Tensor::zeros(param->shape());
             state.v = Tensor::zeros(param->shape());
         }
@@ -82,16 +84,10 @@ void AdamW::step() {
         float* p = (float*)param->data();
         int64_t n = param->numel();
         
-        // AdamW update
         for (int64_t i = 0; i < n; i++) {
-            // Weight decay (decoupled)
             p[i] -= lr * weight_decay_ * p[i];
-            
-            // Biased moment estimates
             m[i] = beta1_ * m[i] + (1.0f - beta1_) * g[i];
             v[i] = beta2_ * v[i] + (1.0f - beta2_) * g[i] * g[i];
-            
-            // Bias-corrected update
             float m_hat = m[i] / bias_corr1;
             float v_hat = v[i] / bias_corr2;
             p[i] -= lr_adj * m_hat / (std::sqrt(v_hat) + eps_);
@@ -106,10 +102,10 @@ SGD::SGD(float lr, float momentum, float weight_decay)
 
 void SGD::step() {
     for (auto* param : parameters_) {
-        if (!param->requires_grad() || param->grad().numel() == 0) continue;
+        if (!param->requires_grad() || !param->has_grad() || param->grad().numel() == 0) continue;
         
         auto& state = state_[param];
-        if (state.m.numel() == 0) {
+        if (!state.m.buffer()) {
             state.m = Tensor::zeros(param->shape());
         }
         

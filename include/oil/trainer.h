@@ -67,6 +67,7 @@ public:
     void set_log_callback(LogCallback cb);
     
     const TrainMetrics& metrics() const;
+    const std::vector<Tensor*>& get_model_params() const { return model_params_; }
     
 private:
     Model* model_;
@@ -74,6 +75,7 @@ private:
     AdamW* optimizer_ = nullptr;
     TrainMetrics metrics_;
     LogCallback log_cb_;
+    std::vector<Tensor*> model_params_;
     
     int step_ = 0;
 };

@@ -236,16 +236,14 @@ Tensor OILReader::read_tensor(const std::string& name) const {
                 if (bd.format == Format::FP32 && bd.indices.size() >= bd.num_weights * 4) {
                     memcpy(td, bd.indices.data(), bd.num_weights * 4);
                 } else if (bd.format == Format::OIL8 && bd.codebook.size() >= 256 * 4) {
-                    CodebookOIL8 cb = CodebookOIL8::deserialize(bd.codebook.data(), *(size_t*)0);
                     size_t tmp_off = 0;
-                    cb = CodebookOIL8::deserialize(bd.codebook.data(), tmp_off);
+                    CodebookOIL8 cb = CodebookOIL8::deserialize(bd.codebook.data(), tmp_off);
                     for (uint32_t j = 0; j < bd.num_weights; j++) {
                         td[j] = cb.dequantize(bd.indices[j]);
                     }
                 } else if (bd.format == Format::OIL4 && bd.codebook.size() >= 16 * 2) {
-                    CodebookOIL4 cb = CodebookOIL4::deserialize(bd.codebook.data(), *(size_t*)0);
                     size_t tmp_off = 0;
-                    cb = CodebookOIL4::deserialize(bd.codebook.data(), tmp_off);
+                    CodebookOIL4 cb = CodebookOIL4::deserialize(bd.codebook.data(), tmp_off);
                     for (uint32_t j = 0; j < bd.num_weights; j++) {
                         uint8_t idx;
                         if (j % 2 == 0) idx = bd.indices[j / 2] & 0x0F;

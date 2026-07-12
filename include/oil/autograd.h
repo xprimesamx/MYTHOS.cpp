@@ -4,6 +4,7 @@
 #include <memory>
 #include <vector>
 #include <unordered_map>
+#include <functional>
 
 namespace oil {
 
@@ -29,19 +30,45 @@ public:
     void register_node(const std::shared_ptr<AutogradNode>& node);
     void clear();
 
+    static bool enabled() { return enabled_; }
+    static void set_enabled(bool e) { enabled_ = e; }
+
+    // Register a parameter tensor so gradient is set on the original, not autograd copies
+    void register_parameter(Tensor* p);
+
+    // Autograd-aware operation helpers (create node if enabled)
+    static Tensor matmul_op(const Tensor& a, const Tensor& b, int64_t M, int64_t N, int64_t K);
+    static Tensor add_op(const Tensor& a, const Tensor& b);
+    static Tensor silu_op(const Tensor& x);
+    static Tensor mul_op(const Tensor& a, const Tensor& b);
+    static Tensor rms_norm_op(const Tensor& x, const Tensor& gamma, float eps);
+    static Tensor cross_entropy_op(const Tensor& logits, const Tensor& labels);
+    static Tensor rotary_op(const Tensor& x, const Tensor& cos_cached, const Tensor& sin_cached,
+                            int64_t seq_start, int64_t seq_len);
+    static Tensor attention_op(const Tensor& q, const Tensor& k, const Tensor& v,
+                               int64_t num_heads, int64_t num_kv_heads, int64_t head_dim);
+    static Tensor bias_add_op(const Tensor& x, const Tensor& bias);
+    static Tensor embedding_op(const Tensor& input_ids, const Tensor& weight);
+    static Tensor flatten_attention_op(const Tensor& x, int64_t B, int64_t H, int64_t S, int64_t D);
+    static Tensor transpose_op(const Tensor& x, int dim1, int dim2);
+
 private:
     AutogradEngine() = default;
     std::vector<std::shared_ptr<AutogradNode>> nodes_;
     std::unordered_map<void*, std::weak_ptr<AutogradNode>> output_to_node_;
+    std::unordered_map<void*, Tensor*> param_map_;
+    static bool enabled_;
 };
 
 Tensor matmul_grad(const Tensor& a, const Tensor& b, const Tensor& grad_output);
+Tensor matmul_grad_wrt_a(const Tensor& grad_output, const Tensor& b);
+Tensor matmul_grad_wrt_b(const Tensor& grad_output, const Tensor& a);
 Tensor relu_grad(const Tensor& x, const Tensor& grad);
 Tensor silu_grad(const Tensor& x, const Tensor& grad);
 Tensor gelu_grad(const Tensor& x, const Tensor& grad);
 Tensor softmax_grad(const Tensor& output, const Tensor& grad);
-Tensor layer_norm_grad(const Tensor& x, const Tensor& gamma, const Tensor& grad, int N);
-Tensor rms_norm_grad(const Tensor& x, const Tensor& gamma, const Tensor& grad, int N);
+Tensor layer_norm_grad(const Tensor& x, const Tensor& gamma, const Tensor& grad, int N, Tensor* dgamma = nullptr);
+Tensor rms_norm_grad(const Tensor& x, const Tensor& gamma, const Tensor& grad, int N, Tensor* dgamma = nullptr);
 
 Tensor cross_entropy_loss(const Tensor& logits, const Tensor& targets);
 Tensor cross_entropy_grad(const Tensor& logits, const Tensor& targets);

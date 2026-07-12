@@ -48,6 +48,7 @@ inline float format_bpw(Format f) {
 }
 
 enum class DType : uint8_t {
+    I64,     // int64_t
     U8,      // uint8_t
     U4,      // 4-bit packed (2 per byte)
     I2,      // 2-bit ternary packed (4 per byte)
@@ -58,6 +59,7 @@ enum class DType : uint8_t {
 
 inline size_t dtype_size(DType dt) {
     switch (dt) {
+        case DType::I64: return 8;
         case DType::U8: return 1;
         case DType::U4: return 1; // 2 per byte
         case DType::I2: return 1; // 4 per byte

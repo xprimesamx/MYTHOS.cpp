@@ -7,4 +7,7 @@
 #cmakedefine OIL_AVX2
 #cmakedefine OIL_AVX512
 #cmakedefine OIL_NEON
+#cmakedefine OIL_USE_DIRECTX
+#cmakedefine OIL_USE_CUDA
+#cmakedefine OIL_USE_VULKAN
 #cmakedefine OIL_DEBUG

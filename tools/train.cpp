@@ -109,7 +109,6 @@ int main(int argc, char** argv) {
 
     oil::DataLoader dataloader(&tokenizer, args.data_path,
                                args.batch_size, args.seq_length);
-    std::cout << "Batches per epoch: " << dataloader.num_batches() << "\n";
 
     oil::TrainConfig train_cfg;
     train_cfg.batch_size = args.batch_size;

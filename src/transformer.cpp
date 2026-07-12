@@ -1,25 +1,41 @@
 #include "oil/transformer.h"
 #include "oil/math.h"
+#include "oil/autograd.h"
+#include "oil/random.h"
 #include <cmath>
 #include <cstring>
 
 namespace oil {
 
+// Initialize weight with uniform random values in [-bound, bound]
+static void init_uniform(Tensor& t, float bound) {
+    RNG rng(42);
+    float* d = t.data<float>();
+    for (int64_t i = 0; i < t.numel(); i++)
+        d[i] = (rng.uniform() * 2.0f - 1.0f) * bound;
+}
+
 // Embedding
 Embedding::Embedding(int64_t vocab_size, int64_t dim)
-    : weight(Tensor::zeros(Shape{vocab_size, dim})) {}
+    : weight(Tensor::zeros(Shape{vocab_size, dim})) {
+    float scale = 1.0f / std::sqrt((float)dim);
+    init_uniform(weight, scale);
+}
 
 Tensor Embedding::forward(const Tensor& input_ids) const {
+    if (AutogradEngine::enabled())
+        return AutogradEngine::embedding_op(input_ids, weight);
     int64_t batch = input_ids.numel();
     int64_t dim = weight.shape().dims[1];
+    int64_t vocab = weight.shape().dims[0];
     Tensor out(Shape{batch, dim}, DType::F32);
-    const int* ids = (const int*)input_ids.data();
-    const float* w = (const float*)weight.data();
-    float* od = (float*)out.data();
+    const float* ids = input_ids.data<float>();
+    const float* w = weight.data<float>();
+    float* od = out.data<float>();
     for (int64_t i = 0; i < batch; i++) {
-        int id = ids[i];
+        int64_t id = (int64_t)ids[i];
         if (id < 0) id = 0;
-        if (id >= weight.shape().dims[0]) id = 0;
+        if (id >= vocab) id = 0;
         memcpy(od + i * dim, w + id * dim, dim * sizeof(float));
     }
     return out;
@@ -30,7 +46,10 @@ size_t Embedding::param_count() const { return weight.numel(); }
 // Linear
 Linear::Linear(int64_t in_features, int64_t out_features)
     : weight(Tensor::zeros(Shape{out_features, in_features})),
-      bias(Tensor::zeros(Shape{out_features})) {}
+      bias(Tensor::zeros(Shape{out_features})) {
+    float scale = 1.0f / std::sqrt((float)in_features);
+    init_uniform(weight, scale);
+}
 
 Tensor Linear::forward(const Tensor& input) const {
     int64_t in_dim = weight.shape().dims[1];
@@ -38,23 +57,20 @@ Tensor Linear::forward(const Tensor& input) const {
     int64_t in_rank = input.rank();
     int64_t batch = input.numel() / in_dim;
     
-    // Flatten leading dims for the gemm
     Tensor inp2d = (in_rank > 2) ? input.reshape(Shape{batch, in_dim}) : input;
     
-    Tensor out(Shape{batch, out_dim}, DType::F32);
-    kernel::scalar_gemm(
-        (const float*)inp2d.data(),
-        (const float*)weight.data(),
-        (float*)out.data(),
-        batch, out_dim, in_dim
-    );
+    Tensor out = AutogradEngine::matmul_op(inp2d, weight, batch, out_dim, in_dim);
     
     if (bias.numel() > 0) {
-        float* od = (float*)out.data();
-        const float* bd = (const float*)bias.data();
-        for (int64_t i = 0; i < batch; i++) {
-            for (int64_t j = 0; j < out_dim; j++) {
-                od[i * out_dim + j] += bd[j];
+        if (AutogradEngine::enabled()) {
+            out = AutogradEngine::bias_add_op(out, bias);
+        } else {
+            float* od = (float*)out.data();
+            const float* bd = (const float*)bias.data();
+            for (int64_t i = 0; i < batch; i++) {
+                for (int64_t j = 0; j < out_dim; j++) {
+                    od[i * out_dim + j] += bd[j];
+                }
             }
         }
     }
@@ -75,9 +91,7 @@ RMSNorm::RMSNorm(int64_t size, float eps_val)
     : weight(Tensor::ones(Shape{size})), eps(eps_val) {}
 
 Tensor RMSNorm::forward(const Tensor& input) const {
-    Tensor out = input.clone();
-    math::rms_norm(input, weight, eps, out);
-    return out;
+    return AutogradEngine::rms_norm_op(input, weight, eps);
 }
 
 // RotaryEmbedding
@@ -137,101 +151,115 @@ Tensor Attention::forward(const Tensor& x, const Tensor& positions,
                            const Tensor& mask, KVCache& cache, int layer_idx) const {
     int64_t B = x.shape().dims[0];
     int64_t S = x.shape().dims[1];
-    int64_t D = x.shape().dims[2];
     
     Tensor q = q_proj.forward(x);
     Tensor k = k_proj.forward(x);
     Tensor v = v_proj.forward(x);
     
     // Reshape to [B, H, S, head_dim]
-    Tensor q_reshaped = q.reshape(Shape{B, S, num_heads, head_dim}).transpose(1, 2);
-    Tensor k_reshaped = k.reshape(Shape{B, S, num_kv_heads, head_dim}).transpose(1, 2);
-    Tensor v_reshaped = v.reshape(Shape{B, S, num_kv_heads, head_dim}).transpose(1, 2);
+    Tensor q_reshaped = q.reshape(Shape{B, S, num_heads, head_dim});
+    Tensor k_reshaped = k.reshape(Shape{B, S, num_kv_heads, head_dim});
+    Tensor v_reshaped = v.reshape(Shape{B, S, num_kv_heads, head_dim});
     
-    // Apply RoPE
-    int64_t seq_start = cache.context_len();
-    rope.apply(q_reshaped, seq_start, S);
-    rope.apply(k_reshaped, seq_start, S);
-    
-    // Update KV cache
-    cache.append(layer_idx, k_reshaped, v_reshaped);
-    
-    // Get full K,V from cache
-    auto [k_full, v_full] = cache.get_all(layer_idx);
-    
-    // Scaled dot-product attention
-    int64_t S_full = k_full.shape().dims[2];
-    float scale = 1.0f / std::sqrt((float)head_dim);
-    Tensor score(Shape{B, num_heads, S, S_full}, DType::F32);
-    
-    const float* qd = (const float*)q_reshaped.data();
-    const float* kd = (const float*)k_full.data();
-    float* sd = (float*)score.data();
-    
-    for (int64_t b = 0; b < B; b++) {
-        for (int64_t h = 0; h < num_heads; h++) {
-            int64_t kh = h % num_kv_heads;
-            for (int64_t s = 0; s < S; s++) {
-                for (int64_t t = 0; t < S_full; t++) {
-                    float sum = 0;
-                    for (int64_t d = 0; d < head_dim; d++) {
-                        sum += qd[b * num_heads * S * head_dim + h * S * head_dim + s * head_dim + d]
-                             * kd[kh * S_full * head_dim + t * head_dim + d];  // kv cache is shared (batch=1)
-                    }
-                    sd[b * num_heads * S * S_full + h * S * S_full + s * S_full + t] = sum * scale;
-                }
-            }
-        }
-    }
-    
-    // Softmax
-    Tensor attn_weights(score.shape(), DType::F32);
-    for (int64_t b = 0; b < B; b++) {
-        for (int64_t h = 0; h < num_heads; h++) {
-            for (int64_t s = 0; s < S; s++) {
-                float max_v = -INFINITY;
-                for (int64_t t = 0; t < S_full; t++) {
-                    float v = sd[b * num_heads * S * S_full + h * S * S_full + s * S_full + t];
-                    if (v > max_v) max_v = v;
-                }
-                float sum_exp = 0;
-                for (int64_t t = 0; t < S_full; t++) {
-                    float e = std::exp(sd[b * num_heads * S * S_full + h * S * S_full + s * S_full + t] - max_v);
-                    sum_exp += e;
-                    attn_weights.data<float>()[b * num_heads * S * S_full + h * S * S_full + s * S_full + t] = e;
-                }
-                for (int64_t t = 0; t < S_full; t++) {
-                    attn_weights.data<float>()[b * num_heads * S * S_full + h * S * S_full + s * S_full + t] /= sum_exp;
-                }
-            }
-        }
-    }
-    
-    // Attention output
-    Tensor attn_out(Shape{B, num_heads, S, head_dim}, DType::F32);
-    const float* aw = (const float*)attn_weights.data();
-    const float* vd = (const float*)v_full.data();
-    float* aod = (float*)attn_out.data();
-    
-    for (int64_t b = 0; b < B; b++) {
-        for (int64_t h = 0; h < num_heads; h++) {
-            int64_t kh = h % num_kv_heads;
-            for (int64_t s = 0; s < S; s++) {
-                for (int64_t d = 0; d < head_dim; d++) {
-                    float sum = 0;
+    Tensor attn_out;
+    if (AutogradEngine::enabled()) {
+        // Training path: use autograd RoPE and attention (no KV cache)
+        Tensor q_t = AutogradEngine::transpose_op(q_reshaped, 1, 2);
+        Tensor k_t = AutogradEngine::transpose_op(k_reshaped, 1, 2);
+        Tensor v_t = AutogradEngine::transpose_op(v_reshaped, 1, 2);
+        Tensor q_rope = AutogradEngine::rotary_op(q_t, rope.cos_cached, rope.sin_cached, 0, S);
+        Tensor k_rope = AutogradEngine::rotary_op(k_t, rope.cos_cached, rope.sin_cached, 0, S);
+        attn_out = AutogradEngine::attention_op(q_rope, k_rope, v_t, num_heads, num_kv_heads, head_dim);
+    } else {
+        // Inference path: transpose {B,S,H,D} -> {B,H,S,D}, then RoPE + KV cache + attention
+        Tensor q_t = q_reshaped.transpose(1, 2);  // {B, H, S, D}
+        Tensor k_t = k_reshaped.transpose(1, 2);  // {B, KV_H, S, D}
+        Tensor v_t = v_reshaped.transpose(1, 2);  // {B, KV_H, S, D}
+        
+        int64_t seq_start = cache.context_len();
+        rope.apply(q_t, seq_start, S);
+        rope.apply(k_t, seq_start, S);
+        cache.append(layer_idx, k_t, v_t);
+        auto [k_full, v_full] = cache.get_all(layer_idx);
+        int64_t S_full = k_full.shape().dims[2];
+        float scale = 1.0f / std::sqrt((float)head_dim);
+        
+        const float* qd = (const float*)q_t.data();
+        const float* kd = (const float*)k_full.data();
+        const float* vd = (const float*)v_full.data();
+        
+        Tensor score(Shape{B, num_heads, S, S_full}, DType::F32);
+        float* sd = (float*)score.data();
+        for (int64_t b = 0; b < B; b++) {
+            for (int64_t h = 0; h < num_heads; h++) {
+                int64_t kh = h % num_kv_heads;
+                int64_t q_base = ((b * num_heads + h) * S) * head_dim;
+                int64_t k_base = ((b * num_kv_heads + kh) * S_full) * head_dim;
+                int64_t s_base = (b * num_heads + h) * S * S_full;
+                for (int64_t s = 0; s < S; s++) {
                     for (int64_t t = 0; t < S_full; t++) {
-                        sum += aw[b * num_heads * S * S_full + h * S * S_full + s * S_full + t]
-                             * vd[kh * S_full * head_dim + t * head_dim + d];  // kv cache is shared (batch=1)
+                        float sum = 0;
+                        for (int64_t d = 0; d < head_dim; d++)
+                            sum += qd[q_base + s * head_dim + d]
+                                 * kd[k_base + t * head_dim + d];
+                        sd[s_base + s * S_full + t] = sum * scale;
                     }
-                    aod[b * num_heads * S * head_dim + h * S * head_dim + s * head_dim + d] = sum;
+                }
+            }
+        }
+        
+        Tensor attn_weights(score.shape(), DType::F32);
+        float* wd = (float*)attn_weights.data();
+        for (int64_t b = 0; b < B; b++) {
+            for (int64_t h = 0; h < num_heads; h++) {
+                int64_t base = (b * num_heads + h) * S * S_full;
+                for (int64_t s = 0; s < S; s++) {
+                    int64_t row = base + s * S_full;
+                    float max_v = -INFINITY;
+                    for (int64_t t = 0; t < S_full; t++)
+                        if (sd[row + t] > max_v) max_v = sd[row + t];
+                    float sum_exp = 0;
+                    for (int64_t t = 0; t < S_full; t++) {
+                        float e = std::exp(sd[row + t] - max_v);
+                        wd[row + t] = e;
+                        sum_exp += e;
+                    }
+                    float inv_sum = 1.0f / sum_exp;
+                    for (int64_t t = 0; t < S_full; t++)
+                        wd[row + t] *= inv_sum;
+                }
+            }
+        }
+        
+        attn_out = Tensor(Shape{B, num_heads, S, head_dim}, DType::F32);
+        float* aod = (float*)attn_out.data();
+        for (int64_t b = 0; b < B; b++) {
+            for (int64_t h = 0; h < num_heads; h++) {
+                int64_t kh = h % num_kv_heads;
+                int64_t w_base = (b * num_heads + h) * S * S_full;
+                int64_t v_base = ((b * num_kv_heads + kh) * S_full) * head_dim;
+                int64_t o_base = ((b * num_heads + h) * S) * head_dim;
+                for (int64_t s = 0; s < S; s++) {
+                    for (int64_t d = 0; d < head_dim; d++) {
+                        float sum = 0;
+                        for (int64_t t = 0; t < S_full; t++)
+                            sum += wd[w_base + s * S_full + t] * vd[v_base + t * head_dim + d];
+                        aod[o_base + s * head_dim + d] = sum;
+                    }
                 }
             }
         }
     }
     
-    // Output projection: flatten B,S for gemm then restore shape
-    Tensor attn_t = attn_out.transpose(1, 2);
-    Tensor attn_flat = attn_t.reshape(Shape{B * S, num_heads * head_dim});
+    // Output projection: flatten {B,H,S,D} -> {B*S, H*D}
+    Tensor attn_flat;
+    if (AutogradEngine::enabled()) {
+        attn_flat = AutogradEngine::flatten_attention_op(attn_out, B, num_heads, S, head_dim);
+    } else {
+        // Transpose {B,H,S,D} -> {B,S,H,D} then flatten
+        Tensor attn_t = attn_out.transpose(1, 2);
+        attn_flat = attn_t.reshape(Shape{B * S, num_heads * head_dim});
+    }
     Tensor o_out = o_proj.forward(attn_flat);
     return o_out.reshape(Shape{B, S, o_out.dim(1)});
 }
@@ -250,15 +278,14 @@ Tensor FFN::forward(const Tensor& x) const {
     Tensor up = up_proj.forward(x);
     
     if (activation == Activation::SiLU) {
-        math::silu(gate, gate);
+        gate = AutogradEngine::silu_op(gate);
     } else if (activation == Activation::GELU) {
         math::gelu(gate, gate);
     } else {
         math::relu(gate, gate);
     }
     
-    Tensor hidden(Shape{x.shape().dims[0], x.shape().dims[1], gate_proj.weight.shape().dims[0]}, DType::F32);
-    math::mul(gate, up, hidden);
+    Tensor hidden = AutogradEngine::mul_op(gate, up);
     return down_proj.forward(hidden);
 }
 
@@ -271,14 +298,13 @@ TransformerBlock::TransformerBlock(const TransformerConfig& cfg)
 
 Tensor TransformerBlock::forward(const Tensor& x, const Tensor& positions,
                                   const Tensor& mask, KVCache& cache, int layer_idx) const {
-    Tensor residual = x.clone();
-    Tensor attn_input = attention_norm.forward(x.clone());
+    Tensor attn_input = attention_norm.forward(x);
     Tensor attn_out = attention.forward(attn_input, positions, mask, cache, layer_idx);
-    math::add(attn_out, residual, attn_out);
+    attn_out = AutogradEngine::add_op(attn_out, x);
     
-    Tensor ffn_input = ffn_norm.forward(attn_out.clone());
+    Tensor ffn_input = ffn_norm.forward(attn_out);
     Tensor ffn_out = ffn.forward(ffn_input);
-    math::add(ffn_out, attn_out, ffn_out);
+    ffn_out = AutogradEngine::add_op(ffn_out, attn_out);
     return ffn_out;
 }
 

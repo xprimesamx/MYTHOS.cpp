@@ -3,6 +3,7 @@
 #include "oil/autograd.h"
 #include "oil/optimizer.h"
 #include "oil/transformer.h"
+#include <iostream>
 #include <fstream>
 #include <algorithm>
 #include <random>
@@ -108,9 +109,14 @@ void Trainer::compile(AdamW* opt) {
     optimizer_ = opt;
     DenseModel* dm = dynamic_cast<DenseModel*>(model_);
     if (dm) {
-        std::vector<Tensor*> params;
-        collect_trainer_params(dm, params);
-        optimizer_->add_param_group(params);
+        model_params_.clear();
+        collect_trainer_params(dm, model_params_);
+        auto& engine = AutogradEngine::instance();
+        for (auto* p : model_params_) {
+            p->requires_grad(true);
+            engine.register_parameter(p);
+        }
+        optimizer_->add_param_group(model_params_);
     }
 }
 
@@ -143,23 +149,27 @@ void Trainer::fit(DataLoader& dl, const TrainConfig& cfg) {
 float Trainer::train_step(const Tensor& input_ids, const Tensor& labels) {
     if (!optimizer_) return 0;
 
+    int64_t B = input_ids.dim(0);
+    int64_t S = input_ids.dim(1);
+
+    Tensor positions(Shape{B, S}, DType::F32);
+    float* pd = positions.data<float>();
+    for (int64_t i = 0; i < B * S; i++)
+        pd[i] = (float)(i % S);
+
     optimizer_->zero_grad();
 
-    Tensor logits = model_->forward(input_ids, input_ids);
-    Tensor loss = cross_entropy_loss(logits, labels);
-    Tensor loss_grad = cross_entropy_grad(logits, labels);
-
-    DenseModel* dm = dynamic_cast<DenseModel*>(model_);
-    if (dm) {
-        std::vector<Tensor*> params;
-        collect_trainer_params(dm, params);
-        for (auto* param : params) {
-            if (param->numel() > 0) {
-                param->set_grad(loss_grad);
-            }
-        }
+    AutogradEngine::set_enabled(true);
+    // Re-register parameters (clear() removes them from param_map_)
+    auto& engine = AutogradEngine::instance();
+    for (auto* p : model_params_) {
+        engine.register_parameter(p);
     }
-
+    Tensor logits = model_->forward(input_ids, positions);
+    Tensor loss = AutogradEngine::cross_entropy_op(logits, labels);
+    engine.backward(loss);
+    engine.clear();
+    AutogradEngine::set_enabled(false);
     optimizer_->step();
 
     return *(const float*)loss.data();

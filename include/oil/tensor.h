@@ -18,11 +18,11 @@ public:
     explicit Tensor(Shape shape, DType dtype = DType::F32);
     Tensor(Shape shape, std::shared_ptr<Buffer> buffer, DType dtype = DType::F32);
 
-    Tensor(const Tensor&) = default;
-    Tensor& operator=(const Tensor&) = default;
-    Tensor(Tensor&&) = default;
-    Tensor& operator=(Tensor&&) = default;
-    ~Tensor() = default;
+    Tensor(const Tensor&);
+    Tensor& operator=(const Tensor&);
+    Tensor(Tensor&&) noexcept;
+    Tensor& operator=(Tensor&&) noexcept;
+    ~Tensor();
 
     const Shape& shape() const { return shape_; }
     int64_t dim(int i) const { return shape_.dims[i]; }
@@ -53,8 +53,10 @@ public:
 
     bool requires_grad() const { return requires_grad_; }
     void requires_grad(bool req) { requires_grad_ = req; }
-    const Tensor& grad() const { return *grad_; }
+    Tensor& grad() const { return *grad_; }
+    bool has_grad() const { return grad_ != nullptr; }
     void set_grad(const Tensor& g) { delete grad_; grad_ = new Tensor(g); }
+    void zero_grad() { if (grad_) grad_->zero_(); }
 
     size_t serialized_size() const;
     size_t serialize(uint8_t* dst) const;
