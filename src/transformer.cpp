@@ -5,6 +5,10 @@
 #include <cmath>
 #include <cstring>
 
+#if defined(OIL_AVX2) || defined(__AVX2__)
+#include <immintrin.h>
+#endif
+
 namespace oil {
 
 // Initialize weight with uniform random values in [-bound, bound]
@@ -194,14 +198,31 @@ Tensor Attention::forward(const Tensor& x, const Tensor& positions,
             for (int64_t h = 0; h < num_heads; h++) {
                 int64_t kh = h % num_kv_heads;
                 int64_t q_base = ((b * num_heads + h) * S) * head_dim;
-                int64_t k_base = ((b * num_kv_heads + kh) * S_full) * head_dim;
+                int64_t k_base = kh * S_full * head_dim;
                 int64_t s_base = (b * num_heads + h) * S * S_full;
                 for (int64_t s = 0; s < S; s++) {
+                    const float* qptr = qd + q_base + s * head_dim;
                     for (int64_t t = 0; t < S_full; t++) {
+                        const float* kptr = kd + k_base + t * head_dim;
                         float sum = 0;
+#if defined(OIL_AVX2) || defined(__AVX2__)
+                        __m256 sumv = _mm256_setzero_ps();
+                        int64_t d;
+                        for (d = 0; d + 8 <= head_dim; d += 8) {
+                            __m256 qv = _mm256_loadu_ps(qptr + d);
+                            __m256 kv = _mm256_loadu_ps(kptr + d);
+                            sumv = _mm256_fmadd_ps(qv, kv, sumv);
+                        }
+                        float hsum[8];
+                        _mm256_storeu_ps(hsum, sumv);
+                        sum = hsum[0] + hsum[1] + hsum[2] + hsum[3]
+                            + hsum[4] + hsum[5] + hsum[6] + hsum[7];
+                        for (; d < head_dim; d++)
+                            sum += qptr[d] * kptr[d];
+#else
                         for (int64_t d = 0; d < head_dim; d++)
-                            sum += qd[q_base + s * head_dim + d]
-                                 * kd[k_base + t * head_dim + d];
+                            sum += qptr[d] * kptr[d];
+#endif
                         sd[s_base + s * S_full + t] = sum * scale;
                     }
                 }
@@ -215,6 +236,57 @@ Tensor Attention::forward(const Tensor& x, const Tensor& positions,
                 int64_t base = (b * num_heads + h) * S * S_full;
                 for (int64_t s = 0; s < S; s++) {
                     int64_t row = base + s * S_full;
+#if defined(OIL_AVX2) || defined(__AVX2__)
+                    __m256 maxv = _mm256_loadu_ps(sd + row);
+                    int64_t t = 8;
+                    for (; t + 8 <= S_full; t += 8) {
+                        __m256 v = _mm256_loadu_ps(sd + row + t);
+                        maxv = _mm256_max_ps(maxv, v);
+                    }
+                    float max_arr[8];
+                    _mm256_storeu_ps(max_arr, maxv);
+                    float max_v = max_arr[0];
+                    for (int j = 1; j < 8; j++) if (max_arr[j] > max_v) max_v = max_arr[j];
+                    for (t = (t >= S_full ? S_full - 8 : t); t < S_full; t++)
+                        if (sd[row + t] > max_v) max_v = sd[row + t];
+
+                    __m256 sumv = _mm256_setzero_ps();
+                    __m256 mvec = _mm256_set1_ps(max_v);
+                    for (t = 0; t + 8 <= S_full; t += 8) {
+                        __m256 sv = _mm256_loadu_ps(sd + row + t);
+                        sv = _mm256_sub_ps(sv, mvec);
+                        __m256 x = sv;
+                        __m256 e = _mm256_set1_ps(1.0f);
+                        __m256 term = x;
+                        e = _mm256_add_ps(e, term);
+                        term = _mm256_mul_ps(term, x);
+                        e = _mm256_add_ps(e, _mm256_mul_ps(term, _mm256_set1_ps(1.0f/2.0f)));
+                        term = _mm256_mul_ps(term, x);
+                        e = _mm256_add_ps(e, _mm256_mul_ps(term, _mm256_set1_ps(1.0f/6.0f)));
+                        term = _mm256_mul_ps(term, x);
+                        e = _mm256_add_ps(e, _mm256_mul_ps(term, _mm256_set1_ps(1.0f/24.0f)));
+                        _mm256_storeu_ps(wd + row + t, e);
+                        sumv = _mm256_add_ps(sumv, e);
+                    }
+                    float hsum[8];
+                    _mm256_storeu_ps(hsum, sumv);
+                    float sum_exp = hsum[0] + hsum[1] + hsum[2] + hsum[3]
+                                  + hsum[4] + hsum[5] + hsum[6] + hsum[7];
+                    for (; t < S_full; t++) {
+                        float e = std::exp(sd[row + t] - max_v);
+                        wd[row + t] = e;
+                        sum_exp += e;
+                    }
+                    float inv_sum = 1.0f / sum_exp;
+                    __m256 iv = _mm256_set1_ps(inv_sum);
+                    for (t = 0; t + 8 <= S_full; t += 8) {
+                        __m256 wv = _mm256_loadu_ps(wd + row + t);
+                        wv = _mm256_mul_ps(wv, iv);
+                        _mm256_storeu_ps(wd + row + t, wv);
+                    }
+                    for (; t < S_full; t++)
+                        wd[row + t] *= inv_sum;
+#else
                     float max_v = -INFINITY;
                     for (int64_t t = 0; t < S_full; t++)
                         if (sd[row + t] > max_v) max_v = sd[row + t];
@@ -227,6 +299,7 @@ Tensor Attention::forward(const Tensor& x, const Tensor& positions,
                     float inv_sum = 1.0f / sum_exp;
                     for (int64_t t = 0; t < S_full; t++)
                         wd[row + t] *= inv_sum;
+#endif
                 }
             }
         }
@@ -237,13 +310,31 @@ Tensor Attention::forward(const Tensor& x, const Tensor& positions,
             for (int64_t h = 0; h < num_heads; h++) {
                 int64_t kh = h % num_kv_heads;
                 int64_t w_base = (b * num_heads + h) * S * S_full;
-                int64_t v_base = ((b * num_kv_heads + kh) * S_full) * head_dim;
+                int64_t v_base = kh * S_full * head_dim;
                 int64_t o_base = ((b * num_heads + h) * S) * head_dim;
                 for (int64_t s = 0; s < S; s++) {
                     for (int64_t d = 0; d < head_dim; d++) {
                         float sum = 0;
+                        const float* wptr = wd + w_base + s * S_full;
+                        const float* vptr = vd + v_base + d;
+#if defined(OIL_AVX2) || defined(__AVX2__)
+                        __m256 sumv = _mm256_setzero_ps();
+                        int64_t t;
+                        for (t = 0; t + 8 <= S_full; t += 8) {
+                            __m256 wv = _mm256_loadu_ps(wptr + t);
+                            __m256 vv = _mm256_loadu_ps(vptr + t * head_dim);
+                            sumv = _mm256_fmadd_ps(wv, vv, sumv);
+                        }
+                        float hsum[8];
+                        _mm256_storeu_ps(hsum, sumv);
+                        sum = hsum[0] + hsum[1] + hsum[2] + hsum[3]
+                            + hsum[4] + hsum[5] + hsum[6] + hsum[7];
+                        for (; t < S_full; t++)
+                            sum += wptr[t] * vptr[t * head_dim + d];
+#else
                         for (int64_t t = 0; t < S_full; t++)
-                            sum += wd[w_base + s * S_full + t] * vd[v_base + t * head_dim + d];
+                            sum += wptr[t] * vptr[t * head_dim + d];
+#endif
                         aod[o_base + s * head_dim + d] = sum;
                     }
                 }

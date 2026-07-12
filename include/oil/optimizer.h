@@ -19,6 +19,10 @@ public:
         Tensor m, v;
     };
 
+    ParamState& get_state(Tensor* p) { return state_[p]; }
+    const std::unordered_map<Tensor*, ParamState>& all_state() const { return state_; }
+    std::unordered_map<Tensor*, ParamState>& mutable_state() { return state_; }
+
 protected:
     std::vector<Tensor*> parameters_;
     std::unordered_map<Tensor*, ParamState> state_;

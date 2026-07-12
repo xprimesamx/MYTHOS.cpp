@@ -3,6 +3,7 @@
 #include "oil/generator.h"
 #include "oil/tensor.h"
 #include "oil/types.h"
+#include "oil/oil_format.h"
 
 #include <iostream>
 #include <string>
@@ -10,6 +11,9 @@
 #include <cmath>
 #include <iomanip>
 #include <cstring>
+#include <fstream>
+#include <sstream>
+#include <algorithm>
 
 struct QualityResult {
     std::string model_name;
@@ -28,12 +32,16 @@ static double compute_perplexity(oil::Model& model, oil::Tokenizer& tokenizer,
     oil::Tensor input(oil::Shape{1, N}, oil::DType::F32);
     oil::Tensor target(oil::Shape{1, N}, oil::DType::F32);
     for (int64_t i = 0; i < N; i++) {
-        ((int*)input.data())[i] = ids[i];
-        ((int*)target.data())[i] = ids[i + 1];
+        float fval = static_cast<float>(ids[i]);
+        std::memcpy(input.data<float>() + i, &fval, sizeof(float));
+        float tval = static_cast<float>(ids[i + 1]);
+        std::memcpy(target.data<float>() + i, &tval, sizeof(float));
     }
     oil::Tensor positions(oil::Shape{1, N}, oil::DType::F32);
-    for (int64_t i = 0; i < N; i++)
-        ((int*)positions.data())[i] = (int)i;
+    for (int64_t i = 0; i < N; i++) {
+        float pval = static_cast<float>(i);
+        std::memcpy(positions.data<float>() + i, &pval, sizeof(float));
+    }
 
     auto logits = model.forward(input, positions);
     float* ld = logits.data<float>();
@@ -41,7 +49,9 @@ static double compute_perplexity(oil::Model& model, oil::Tokenizer& tokenizer,
 
     double nll = 0.0;
     for (int64_t i = 0; i < N; i++) {
-        int target_id = ((int*)target.data())[i];
+        float target_val;
+        std::memcpy(&target_val, target.data<float>() + i, sizeof(float));
+        int target_id = (int)target_val;
         float* row = ld + i * V;
         float max_val = -INFINITY;
         for (int64_t j = 0; j < V; j++)
@@ -56,28 +66,38 @@ static double compute_perplexity(oil::Model& model, oil::Tokenizer& tokenizer,
     return std::exp(nll / (double)N);
 }
 
-int main() {
-    std::cout << "=== OIL Quality Benchmarks ===" << std::endl;
-    std::cout << "NOTE: Quality benchmarks require a trained model file.\n" << std::endl;
+int main(int argc, char** argv) {
+    if (argc < 4) {
+        std::cout << "Usage: bench_quality <model.oil> <vocab.vocab> <eval.txt>" << std::endl;
+        return 1;
+    }
 
-    // Quality metrics placeholder
-    std::cout << std::left << std::setw(24) << "Metric"
-              << std::setw(14) << "Value"
-              << std::endl;
-    std::cout << std::string(38, '-') << std::endl;
+    std::string model_path = argv[1];
+    std::string vocab_path = argv[2];
+    std::string eval_path = argv[3];
 
-    // These are placeholder measurements; real values require trained models
-    std::cout << std::left << std::setw(24) << "Perplexity (placeholder)"
-              << std::setw(14) << "N/A" << std::endl;
-    std::cout << std::left << std::setw(24) << "Accuracy (placeholder)"
-              << std::setw(14) << "N/A" << std::endl;
-    std::cout << std::left << std::setw(24) << "Quality Score (placeholder)"
-              << std::setw(14) << "N/A" << std::endl;
+    std::ifstream efile(eval_path);
+    if (!efile) { std::cerr << "Cannot open " << eval_path << std::endl; return 1; }
+    std::stringstream buf;
+    buf << efile.rdbuf();
+    std::string eval_text = buf.str();
 
-    std::cout << "\nTo run quality benchmarks:\n";
-    std::cout << "  1. Train a model with oil_train\n";
-    std::cout << "  2. Run: oil_info <model.oil> to verify\n";
-    std::cout << "  3. Modify this file to load your model and run eval\n";
+    oil::BPETokenizer tokenizer;
+    tokenizer.load(vocab_path);
 
+    oil::OILReader reader(model_path);
+    auto config_data = reader.read_config();
+    oil::TransformerConfig cfg;
+    std::memcpy(&cfg, config_data.data(), std::min(config_data.size(), sizeof(cfg)));
+
+    oil::DenseModel model(cfg);
+    model.load(model_path);
+
+    double ppl = compute_perplexity(model, tokenizer, eval_text);
+
+    std::cout << std::fixed << std::setprecision(4);
+    std::cout << "\nQuality Benchmarks:" << std::endl;
+    std::cout << "  Model:      " << model_path << std::endl;
+    std::cout << "  Perplexity: " << ppl << std::endl;
     return 0;
 }

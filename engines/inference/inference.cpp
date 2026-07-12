@@ -81,7 +81,7 @@ Status InferenceEngine::load(const std::string& oil_path) {
         Status s = deserialize_config(config_data, model_cfg);
         if (!s) return s;
 
-        auto* model = new DenseModel(model_cfg);
+        auto model = std::make_unique<DenseModel>(model_cfg);
         model->load(oil_path);
 
         std::string vocab_path = oil_path;
@@ -93,11 +93,11 @@ Status InferenceEngine::load(const std::string& oil_path) {
         if (!std::filesystem::exists(vocab_path))
             return Status::error("Vocabulary file not found: " + vocab_path);
 
-        auto* tokenizer = new BPETokenizer();
+        auto tokenizer = std::make_unique<BPETokenizer>();
         tokenizer->load(vocab_path);
 
-        model_ = model;
-        tokenizer_ = tokenizer;
+        model_ = model.release();
+        tokenizer_ = tokenizer.release();
         owns_model_ = true;
         owns_tokenizer_ = true;
 
@@ -146,6 +146,7 @@ std::vector<std::string> InferenceEngine::generate_batch(const std::vector<std::
     std::vector<std::string> results;
     results.reserve(prompts.size());
     for (const auto& prompt : prompts) {
+        reset_context();
         results.push_back(generate(prompt));
     }
     return results;

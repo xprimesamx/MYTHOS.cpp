@@ -8,6 +8,8 @@
 
 namespace oil {
 
+class MappedFile;
+
 #pragma pack(push, 1)
 struct OILHeader {
     char magic[4];      // "OIL1"
@@ -72,13 +74,15 @@ public:
     std::vector<Format> tensor_formats(const std::string& name) const;
     
 private:
+    MappedFile* mapped_file_;
+    const uint8_t* data_;
+    size_t file_size_;
     OILHeader header_;
     size_t format_table_offset_;
     size_t tensor_table_offset_;
     size_t data_offset_;
     uint32_t num_format_blocks_;
     uint32_t num_tensors_;
-    mutable std::ifstream file_;
     mutable std::vector<FormatBlockEntry> cached_ft_;
 };
 

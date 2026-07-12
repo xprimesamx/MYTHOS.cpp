@@ -17,8 +17,44 @@ Format STEQuantizer::target_format() const {
 }
 
 Tensor STEQuantizer::forward(const Tensor& fp32_weight) {
-    // STE: forward returns a copy (identity in forward pass)
-    return fp32_weight.clone();
+    // Real STE: quantize → dequantize → return
+    // Forward pass sees quantization noise
+    // Backward (STE): gradient flows through unchanged
+    int64_t n = fp32_weight.numel();
+    const float* src = (const float*)fp32_weight.data();
+    Tensor result(Shape{n}, DType::F32);
+    float* rd = (float*)result.data();
+
+    switch (target_format_) {
+        case Format::TERNARY: {
+            std::vector<uint8_t> packed((n + 3) / 4);
+            float scale;
+            quantize_ternary(src, packed.data(), &scale, n);
+            for (int64_t i = 0; i < n; i++) {
+                int v = (packed[i / 4] >> (2 * (i % 4))) & 3;
+                rd[i] = (float)(v == 0 ? -1 : v == 1 ? 0 : 1) * scale;
+            }
+            break;
+        }
+        case Format::OIL8: {
+            CodebookOIL8 cb;
+            cb.train(src, (size_t)n);
+            for (int64_t i = 0; i < n; i++)
+                rd[i] = cb.dequantize(cb.quantize(src[i]));
+            break;
+        }
+        case Format::OIL4: {
+            CodebookOIL4 cb;
+            cb.train(src, (size_t)n);
+            for (int64_t i = 0; i < n; i++)
+                rd[i] = cb.dequantize(cb.quantize(src[i]));
+            break;
+        }
+        default:
+            std::memcpy(rd, src, (size_t)n * sizeof(float));
+            break;
+    }
+    return result;
 }
 
 float STEQuantizer::find_scale(const float* data, int64_t n) {
@@ -95,6 +131,65 @@ Tensor STEQuantizer::quantize_with_codebook(const Tensor& fp32_weight, CodebookO
         rd[i] = codebook.dequantize(idx);
     }
 
+    return result;
+}
+
+Tensor STEQuantizer::forward_mixed(const Tensor& weights, const std::vector<Format>& per_block_formats, int block_size) {
+    int64_t n = weights.numel();
+    const float* src = (const float*)weights.data();
+    Tensor result(Shape{n}, DType::F32);
+    float* rd = (float*)result.data();
+
+    int64_t num_blocks = (int64_t)per_block_formats.size();
+
+    for (int64_t b = 0; b < num_blocks; b++) {
+        int64_t block_start = b * block_size;
+        int64_t block_end = std::min(block_start + block_size, n);
+        int64_t block_n = block_end - block_start;
+        if (block_n <= 0) break;
+
+        Format fmt = per_block_formats[(size_t)b];
+
+        switch (fmt) {
+            case Format::TERNARY: {
+                std::vector<uint8_t> packed((block_n + 3) / 4);
+                float scale;
+                quantize_ternary(src + block_start, packed.data(), &scale, block_n);
+                for (int64_t i = 0; i < block_n; i++) {
+                    int v = (packed[(size_t)i / 4] >> (2 * (i % 4))) & 3;
+                    rd[block_start + i] = (float)(v == 0 ? -1 : v == 1 ? 0 : 1) * scale;
+                }
+                break;
+            }
+            case Format::BINARY: {
+                std::vector<uint8_t> packed((block_n + 7) / 8);
+                float scale;
+                quantize_binary(src + block_start, packed.data(), &scale, block_n);
+                for (int64_t i = 0; i < block_n; i++) {
+                    int v = (packed[(size_t)i / 8] >> (i % 8)) & 1;
+                    rd[block_start + i] = (float)(v == 0 ? -1 : 1) * scale;
+                }
+                break;
+            }
+            case Format::OIL8: {
+                CodebookOIL8 cb;
+                cb.train(src + block_start, (size_t)block_n);
+                for (int64_t i = 0; i < block_n; i++)
+                    rd[block_start + i] = cb.dequantize(cb.quantize(src[block_start + i]));
+                break;
+            }
+            case Format::OIL4: {
+                CodebookOIL4 cb;
+                cb.train(src + block_start, (size_t)block_n);
+                for (int64_t i = 0; i < block_n; i++)
+                    rd[block_start + i] = cb.dequantize(cb.quantize(src[block_start + i]));
+                break;
+            }
+            default:
+                std::memcpy(rd + block_start, src + block_start, (size_t)block_n * sizeof(float));
+                break;
+        }
+    }
     return result;
 }
 

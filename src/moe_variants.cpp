@@ -131,33 +131,11 @@ MoEOutput SparseMoE::forward(const Tensor& x, bool training) {
     Tensor indices, weights;
     Tensor probs = softmax_with_topk(logits, K, indices, weights);
 
-    Tensor output({T, D});
-    output.zero_();
-    float* od = output.data<float>();
-    const float* xd = x_flat.data<float>();
-
-    int64_t* idx_ptr = indices.data<int64_t>();
-    float* w_ptr = weights.data<float>();
-
     float zl = 0.0f;
     int64_t dropped = 0;
-    for (int64_t t = 0; t < T; ++t) {
-        for (int64_t k = 0; k < K; ++k) {
-            int64_t e = idx_ptr[t * K + k];
-            if (e < 0 || e >= E) { dropped++; continue; }
-            float w = w_ptr[t * K + k];
-            if (w <= 0.0f) { dropped++; continue; }
-            Tensor inp({1, D});
-            std::memcpy(inp.data<float>(), xd + t * D, D * sizeof(float));
-            Tensor eout = experts[(size_t)e].forward(inp);
-            const float* ed = eout.data<float>();
-            for (int64_t d = 0; d < D; ++d) {
-                float v = w * ed[d];
-                od[t * D + d] += v;
-                zl += v * v;
-            }
-        }
-    }
+    Tensor output = moe_dispatch_batched(x_flat, experts,
+        indices.data<int64_t>(), weights.data<float>(),
+        T, K, E, D, &zl, &dropped);
 
     MoEOutput out;
     out.output = output.reshape({B, S, D});
@@ -463,20 +441,27 @@ MoEOutput ExpertChoiceMoE::forward(const Tensor& x) {
         scored.reserve(T);
         for (int64_t t = 0; t < T; ++t)
             scored.push_back({l[t * E + e], t});
-        std::partial_sort(scored.begin(), scored.begin() + std::min(capacity, T), scored.end(),
-            [](auto& a, auto& b) { return a.first > b.first; });
         int64_t actual_cap = std::min(capacity, T);
-        for (int64_t k = 0; k < actual_cap; ++k) {
-            int64_t t = scored[k].second;
-            float score = scored[k].first;
-            if (score <= 0.0f) continue;
-            Tensor inp({1, D});
-            std::memcpy(inp.data<float>(), xd + t * D, D * sizeof(float));
-            Tensor eout = experts[(size_t)e].forward(inp);
-            const float* ed = eout.data<float>();
+        std::partial_sort(scored.begin(), scored.begin() + actual_cap, scored.end(),
+            [](auto& a, auto& b) { return a.first > b.first; });
+        std::vector<int64_t> chosen;
+        for (int64_t k = 0; k < actual_cap; ++k)
+            if (scored[k].first > 0.0f) chosen.push_back(scored[k].second);
+        int64_t nt = (int64_t)chosen.size();
+        if (nt == 0) continue;
+
+        Tensor batch_input({nt, D});
+        float* bi = batch_input.data<float>();
+        for (int64_t i = 0; i < nt; ++i)
+            std::memcpy(bi + i * D, xd + chosen[(size_t)i] * D, (size_t)D * sizeof(float));
+
+        Tensor batch_output = experts[(size_t)e].forward(batch_input);
+        const float* bo = batch_output.data<float>();
+        for (int64_t i = 0; i < nt; ++i) {
+            int64_t t = chosen[(size_t)i];
             for (int64_t d = 0; d < D; ++d) {
-                od[t * D + d] += ed[d];
-                zl += ed[d] * ed[d];
+                od[t * D + d] += bo[i * D + d];
+                zl += bo[i * D + d] * bo[i * D + d];
             }
             total_assigned++;
         }
@@ -548,15 +533,19 @@ MoEOutput HashMoE::forward(const Tensor& x, const Tensor& token_ids) {
     float zl = 0.0f;
     for (int64_t e = 0; e < E; ++e) {
         auto& tokens = expert_tokens[(size_t)e];
-        if (tokens.empty()) continue;
-        for (int64_t t : tokens) {
-            Tensor inp({1, D});
-            std::memcpy(inp.data<float>(), xd + t * D, D * sizeof(float));
-            Tensor eout = experts[(size_t)e].forward(inp);
-            const float* ed = eout.data<float>();
+        int64_t nt = (int64_t)tokens.size();
+        if (nt == 0) continue;
+        Tensor batch_input({nt, D});
+        float* bi = batch_input.data<float>();
+        for (int64_t i = 0; i < nt; ++i)
+            std::memcpy(bi + i * D, xd + tokens[(size_t)i] * D, (size_t)D * sizeof(float));
+        Tensor batch_output = experts[(size_t)e].forward(batch_input);
+        const float* bo = batch_output.data<float>();
+        for (int64_t i = 0; i < nt; ++i) {
+            int64_t t = tokens[(size_t)i];
             for (int64_t d = 0; d < D; ++d) {
-                od[t * D + d] += ed[d];
-                zl += ed[d] * ed[d];
+                od[t * D + d] += bo[i * D + d];
+                zl += bo[i * D + d] * bo[i * D + d];
             }
         }
     }
@@ -596,29 +585,10 @@ MoEOutput CrossLayerMoE::forward(const Tensor& x, int64_t layer_idx) {
     Tensor indices, weights;
     softmax_with_topk(logits, K, indices, weights);
 
-    Tensor output({T, D});
-    output.zero_();
-    float* od = output.data<float>();
-    const float* xd = x_flat.data<float>();
-    int64_t* idx = indices.data<int64_t>();
-    float* w = weights.data<float>();
-
     float zl = 0.0f;
-    for (int64_t t = 0; t < T; ++t) {
-        for (int64_t k = 0; k < K; ++k) {
-            int64_t e = idx[t * K + k];
-            float wv = w[t * K + k];
-            if (e < 0 || e >= E || wv <= 0.0f) continue;
-            Tensor inp({1, D});
-            std::memcpy(inp.data<float>(), xd + t * D, D * sizeof(float));
-            Tensor eout = shared_experts[(size_t)e].forward(inp);
-            const float* ed = eout.data<float>();
-            for (int64_t d = 0; d < D; ++d) {
-                od[t * D + d] += wv * ed[d];
-                zl += ed[d] * ed[d];
-            }
-        }
-    }
+    Tensor output = moe_dispatch_batched(x_flat, shared_experts,
+        indices.data<int64_t>(), weights.data<float>(),
+        T, K, E, D, &zl, nullptr);
 
     MoEOutput out;
     out.output = output.reshape({B, S, D});
@@ -702,29 +672,10 @@ MoEOutput MultiModalMoE::forward(const Tensor& x, const Tensor& modality_hints) 
     Tensor indices, weights;
     Tensor probs = softmax_with_topk(logits, K, indices, weights);
 
-    Tensor output({T, D});
-    output.zero_();
-    float* od = output.data<float>();
-    const float* xd = x_flat.data<float>();
-    int64_t* idx = indices.data<int64_t>();
-    float* w = weights.data<float>();
-
     float zl = 0.0f;
-    for (int64_t t = 0; t < T; ++t) {
-        for (int64_t k = 0; k < K; ++k) {
-            int64_t e = idx[t * K + k];
-            float wv = w[t * K + k];
-            if (e < 0 || e >= E || wv <= 0.0f) continue;
-            Tensor inp({1, D});
-            std::memcpy(inp.data<float>(), xd + t * D, D * sizeof(float));
-            Tensor eout = experts[(size_t)e].forward(inp);
-            const float* ed = eout.data<float>();
-            for (int64_t d = 0; d < D; ++d) {
-                od[t * D + d] += wv * ed[d];
-                zl += ed[d] * ed[d];
-            }
-        }
-    }
+    Tensor output = moe_dispatch_batched(x_flat, experts,
+        indices.data<int64_t>(), weights.data<float>(),
+        T, K, E, D, &zl, nullptr);
 
     MoEOutput out;
     out.output = output.reshape({B, S, D});
@@ -733,6 +684,72 @@ MoEOutput MultiModalMoE::forward(const Tensor& x, const Tensor& modality_hints) 
     out.z_loss = config.z_loss_coef * zl / (float)T;
     out.num_activated_experts = K;
     return out;
+}
+
+// ========================================================================
+// Batched expert dispatch
+// ========================================================================
+
+Tensor moe_dispatch_batched(const Tensor& x_flat,
+                            const std::vector<ExpertFFN>& experts,
+                            const int64_t* indices, const float* weights,
+                            int64_t T, int64_t K, int64_t E, int64_t D,
+                            float* z_loss_out, int64_t* dropped_out) {
+    Tensor output({T, D});
+    output.zero_();
+
+    std::vector<int> counts((size_t)E, 0);
+    for (int64_t t = 0; t < T; ++t)
+        for (int64_t k = 0; k < K; ++k) {
+            int64_t e = indices[t * K + k];
+            if (e >= 0 && e < E) counts[(size_t)e]++;
+        }
+
+    std::vector<std::vector<int64_t>> expert_tokens((size_t)E);
+    for (int64_t e = 0; e < E; ++e)
+        expert_tokens[(size_t)e].reserve((size_t)counts[(size_t)e]);
+    for (int64_t t = 0; t < T; ++t)
+        for (int64_t k = 0; k < K; ++k) {
+            int64_t e = indices[t * K + k];
+            if (e >= 0 && e < E) expert_tokens[(size_t)e].push_back(t);
+        }
+
+    const float* xd = x_flat.data<float>();
+    float* od = output.data<float>();
+    float zl = 0.0f;
+    int64_t dropped = 0;
+
+    for (int64_t e = 0; e < E; ++e) {
+        int64_t nt = (int64_t)expert_tokens[(size_t)e].size();
+        if (nt == 0) continue;
+
+        Tensor batch_input({nt, D});
+        float* bi = batch_input.data<float>();
+        for (int64_t i = 0; i < nt; ++i) {
+            int64_t t = expert_tokens[(size_t)e][(size_t)i];
+            std::memcpy(bi + i * D, xd + t * D, (size_t)D * sizeof(float));
+        }
+
+        Tensor batch_output = experts[(size_t)e].forward(batch_input);
+        const float* bo = batch_output.data<float>();
+
+        for (int64_t i = 0; i < nt; ++i) {
+            int64_t t = expert_tokens[(size_t)e][(size_t)i];
+            float wgt = 0.0f;
+            for (int64_t k = 0; k < K; ++k)
+                if (indices[t * K + k] == e) { wgt = weights[t * K + k]; break; }
+            if (wgt <= 0.0f) { dropped++; continue; }
+            for (int64_t d = 0; d < D; ++d) {
+                float v = wgt * bo[i * D + d];
+                od[t * D + d] += v;
+                zl += v * v;
+            }
+        }
+    }
+
+    if (z_loss_out) *z_loss_out = zl;
+    if (dropped_out) *dropped_out = dropped;
+    return output;
 }
 
 // ========================================================================
@@ -807,5 +824,125 @@ void moe_load_balance(float* f_i, float* P_i,
 }
 
 } // namespace avx2
+
+// ========================================================================
+// 9. MMoE — Multi-gate Mixture of Experts
+// ========================================================================
+
+MMoE::MMoE(int64_t hidden_size, const MoEAllConfig& cfg)
+    : hidden_size(hidden_size), config(cfg) {
+    int64_t num_experts = cfg.num_experts;
+    int64_t ffn_hidden = cfg.expert_hidden_size;
+    int64_t num_tasks = cfg.num_tasks > 0 ? cfg.num_tasks : 1;
+
+    experts.reserve(num_experts);
+    for (int64_t i = 0; i < num_experts; i++)
+        experts.emplace_back(hidden_size, ffn_hidden);
+
+    task_gates.reserve(num_tasks);
+    for (int64_t i = 0; i < num_tasks; i++)
+        task_gates.emplace_back(hidden_size, num_experts);
+}
+
+MoEOutput MMoE::forward(const Tensor& x, int64_t task_id) {
+    MoEOutput out;
+    int64_t T = x.numel() / hidden_size;
+    Tensor x_flat = x.reshape({T, hidden_size});
+    int64_t E = config.num_experts;
+    int64_t K = config.top_k > 0 ? config.top_k : 2;
+
+    int64_t tid = (task_id >= 0 && task_id < (int64_t)task_gates.size()) ? task_id : 0;
+    Tensor gate_logits = task_gates[tid].forward(x_flat);
+
+    Tensor indices({T, K}, DType::I64);
+    Tensor weights({T, K});
+    Tensor probs = softmax_with_topk(gate_logits, K, indices, weights);
+
+    out.router_logits = gate_logits;
+    out.expert_indices = indices;
+    out.expert_weights = weights;
+    out.load_balance_loss = compute_load_balance_loss(gate_logits, indices, E);
+    out.z_loss = compute_z_loss(gate_logits);
+
+    Tensor output = moe_dispatch_batched(x_flat, experts,
+        indices.data<int64_t>(), weights.data<float>(),
+        T, K, E, hidden_size);
+
+    out.output = output.reshape(x.shape());
+    out.num_activated_experts = E;
+    return out;
+}
+
+// ========================================================================
+// 10. DeepSeek-MoE (shared + routed experts)
+// ========================================================================
+
+DeepSeekMoE::DeepSeekMoE(int64_t hidden_size, const MoEAllConfig& cfg)
+    : hidden_size(hidden_size), config(cfg),
+      shared_expert(hidden_size, cfg.expert_hidden_size) {
+    int64_t num_routed = cfg.num_routed_experts > 0 ? cfg.num_routed_experts : 8;
+    int64_t ffn_hidden = cfg.expert_hidden_size;
+
+    routed_experts.reserve(num_routed);
+    for (int64_t i = 0; i < num_routed; i++)
+        routed_experts.emplace_back(hidden_size, ffn_hidden);
+
+    router_weight = Linear(hidden_size, num_routed);
+    expert_biases.assign(num_routed, 0.0f);
+}
+
+MoEOutput DeepSeekMoE::forward(const Tensor& x, bool training) {
+    MoEOutput out;
+    int64_t T = x.numel() / hidden_size;
+    Tensor x_flat = x.reshape({T, hidden_size});
+    int64_t E = (int64_t)routed_experts.size();
+    int64_t K = config.top_k > 0 ? config.top_k : 2;
+
+    // Shared expert is always active
+    Tensor shared_out = shared_expert.forward(x_flat);
+
+    // Route to K experts
+    Tensor gate_logits = router_weight.forward(x_flat);
+    float* gl = gate_logits.data<float>();
+    for (int64_t t = 0; t < T * E; t++)
+        gl[t] += expert_biases[t % E];
+
+    Tensor indices({T, K}, DType::I64);
+    Tensor weights({T, K});
+    Tensor probs = softmax_with_topk(gate_logits, K, indices, weights);
+
+    // Bias update for load balancing (no auxiliary loss)
+    if (training) {
+        const int64_t* idx = indices.data<int64_t>();
+        for (int64_t t = 0; t < T; t++)
+            for (int64_t k = 0; k < K; k++)
+                expert_biases[idx[t * K + k]] -= 0.001f;
+        float mean_bias = 0;
+        for (int64_t e = 0; e < E; e++) mean_bias += expert_biases[e];
+        mean_bias /= E;
+        for (int64_t e = 0; e < E; e++) expert_biases[e] -= mean_bias;
+    }
+
+    out.router_logits = gate_logits;
+    out.expert_indices = indices;
+    out.expert_weights = weights;
+
+    Tensor routed_out = moe_dispatch_batched(x_flat, routed_experts,
+        indices.data<int64_t>(), weights.data<float>(),
+        T, K, E, hidden_size);
+
+    // Combine shared + routed
+    Tensor output({T, hidden_size});
+    float* od = output.data<float>();
+    const float* sd = shared_out.data<float>();
+    const float* rd = routed_out.data<float>();
+    for (int64_t i = 0; i < T * hidden_size; ++i)
+        od[i] = sd[i] + rd[i];
+
+    out.output = output.reshape(x.shape());
+    out.num_activated_experts = E + 1;
+    return out;
+}
+
 } // namespace moe
 } // namespace oil

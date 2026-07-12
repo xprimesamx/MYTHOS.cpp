@@ -64,6 +64,7 @@ add_library(oil_model
   src/model.cpp
   src/kv_cache.cpp
   src/autograd.cpp
+  src/flash_attention.cpp
 )
 target_include_directories(oil_model PUBLIC include)
 target_link_libraries(oil_model PUBLIC oil_kernel)
@@ -86,6 +87,8 @@ add_library(oil_trainer
   src/trainer.cpp
   src/ste_quantizer.cpp
   src/finetune.cpp
+  src/log_writer.cpp
+  src/distributed.cpp
 )
 target_include_directories(oil_trainer PUBLIC include)
 target_link_libraries(oil_trainer PUBLIC oil_model oil_inference oil_tokenizer)
@@ -147,25 +150,56 @@ add_library(oil_moe_variants
 target_include_directories(oil_moe_variants PUBLIC include)
 target_link_libraries(oil_moe_variants PUBLIC oil_model oil_backend)
 
+# oil_multimodal removed — duplicates of moe/ encoders deleted (STUB #11)
+
+# Cat D: Inference optimization
+add_library(oil_inference_opt
+  src/inference_opt.cpp
+)
+target_include_directories(oil_inference_opt PUBLIC include)
+target_link_libraries(oil_inference_opt PUBLIC oil_model oil_inference)
+
+# Cat E: GPU extras (Vulkan, Metal, IGPU, Multi-GPU, auto-tune, fallback)
+target_sources(oil_gpu PRIVATE src/gpu_extras.cpp)
+
+# Cat F: MoE enhancement
+add_library(oil_moe_enhance
+  src/moe_enhance.cpp
+)
+target_include_directories(oil_moe_enhance PUBLIC include)
+target_link_libraries(oil_moe_enhance PUBLIC oil_model oil_moe_variants)
+
+# Cat G: ASI Pipeline
+add_library(oil_asi
+  src/asi.cpp
+)
+target_include_directories(oil_asi PUBLIC include)
+target_link_libraries(oil_asi PUBLIC oil_trainer oil_model)
+
+# Cat H: Multi-Modal
 add_library(oil_multimodal
-  engines/trainer/multimodel/text/multimodal_text.cpp
-  engines/trainer/multimodel/image/vision.cpp
-  engines/trainer/multimodel/audio/audio.cpp
-  engines/trainer/multimodel/video/video.cpp
-  engines/trainer/multimodel/ocr/ocr.cpp
-  engines/trainer/multimodel/embeddings/embeddings.cpp
-  engines/trainer/multimodel/vision/vision.cpp
+  src/multimodal.cpp
 )
-target_include_directories(oil_multimodal PUBLIC include
-  engines/trainer/multimodel/text
-  engines/trainer/multimodel/image
-  engines/trainer/multimodel/audio
-  engines/trainer/multimodel/video
-  engines/trainer/multimodel/ocr
-  engines/trainer/multimodel/embeddings
-  engines/trainer/multimodel/vision
-)
+target_include_directories(oil_multimodal PUBLIC include)
 target_link_libraries(oil_multimodal PUBLIC oil_model)
+
+# Cat I: Production (HTTP server, logging, config, C API, plugins)
+add_library(oil_production
+  src/production.cpp
+)
+target_include_directories(oil_production PUBLIC include)
+target_link_libraries(oil_production PUBLIC oil_model oil_inference)
+
+# CUDA kernels (optional)
+find_package(CUDAToolkit QUIET)
+if(CUDAToolkit_FOUND)
+  add_definitions(-DOIL_HAS_CUDA)
+  enable_language(CUDA)
+  cuda_add_library(oil_cuda_kernels src/kernels/cuda_kernels.cu)
+  target_link_libraries(oil_gpu PUBLIC oil_cuda_kernels CUDA::cublas)
+  target_include_directories(oil_cuda_kernels PUBLIC include)
+  message(STATUS "CUDA found: ${CUDAToolkit_VERSION}")
+endif()
 
 if(OIL_BUILD_TOOLS)
   add_executable(oil_infer tools/infer.cpp)
@@ -222,7 +256,12 @@ if(OIL_BUILD_BENCHMARKS)
   endmacro()
   add_oil_bench(bench_kernels   bench/bench_kernels.cpp   oil_kernel)
   add_oil_bench(bench_inference bench/bench_inference.cpp oil_inference)
-  add_oil_bench(bench_quality   bench/bench_quality.cpp   oil_inference)
+  add_executable(bench_quality bench/bench_quality.cpp)
+  target_include_directories(bench_quality PRIVATE include)
+  target_link_libraries(bench_quality PRIVATE oil_inference oil_tokenizer oil_model oil_format)
+
+  # J1-J15: All benchmarks
+  add_oil_bench(bench_all bench/bench_all.cpp oil_model oil_math oil_moe_variants oil_backend oil_format)
 
   # Hardware-probe / auto-select benchmark
   add_oil_bench(bench_hardware tests/test_bench.cpp oil_backend oil_math)

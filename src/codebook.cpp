@@ -154,6 +154,21 @@ void CodebookOIL8::ema_update(const float* data, const uint8_t* assign, size_t c
     }
 }
 
+void CodebookOIL8::ema_update(float decay) {
+    OIL_CHECK(decay > 0.0f && decay < 1.0f, "EMA decay must be in (0,1)");
+    for (int c = 0; c < SIZE; c++) {
+        double bc = batch_counts_[c];
+        double bs = batch_sums_[c];
+        if (bc > 0.0) {
+            running_counts_[c] = running_counts_[c] * decay + bc * (1.0 - decay);
+            running_sums_[c] = running_sums_[c] * decay + bs * (1.0 - decay);
+            centroids[c] = (float)(running_sums_[c] / running_counts_[c]);
+        }
+        batch_counts_[c] = 0.0;
+        batch_sums_[c] = 0.0;
+    }
+}
+
 uint8_t CodebookOIL8::quantize(float val) const {
     uint8_t best = 0;
     float best_dist = std::numeric_limits<float>::max();
@@ -165,6 +180,8 @@ uint8_t CodebookOIL8::quantize(float val) const {
             best = (uint8_t)i;
         }
     }
+    batch_counts_[best] += 1.0;
+    batch_sums_[best] += val;
     return best;
 }
 
@@ -289,6 +306,21 @@ void CodebookOIL4::ema_update(const float* data, const uint8_t* assign, size_t c
     }
 }
 
+void CodebookOIL4::ema_update(float decay) {
+    OIL_CHECK(decay > 0.0f && decay < 1.0f, "EMA decay must be in (0,1)");
+    for (int c = 0; c < SIZE; c++) {
+        double bc = batch_counts_[c];
+        double bs = batch_sums_[c];
+        if (bc > 0.0) {
+            running_counts_[c] = running_counts_[c] * decay + bc * (1.0 - decay);
+            running_sums_[c] = running_sums_[c] * decay + bs * (1.0 - decay);
+            centroids[c] = float_to_half((float)(running_sums_[c] / running_counts_[c]));
+        }
+        batch_counts_[c] = 0.0;
+        batch_sums_[c] = 0.0;
+    }
+}
+
 uint8_t CodebookOIL4::quantize(float val) const {
     uint8_t best = 0;
     float best_dist = std::numeric_limits<float>::max();
@@ -300,6 +332,8 @@ uint8_t CodebookOIL4::quantize(float val) const {
             best = (uint8_t)i;
         }
     }
+    batch_counts_[best] += 1.0;
+    batch_sums_[best] += val;
     return best;
 }
 

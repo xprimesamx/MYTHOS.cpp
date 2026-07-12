@@ -35,9 +35,8 @@ void tl1_gemm(const Tensor& weights, const Tensor& activations,
 
     Tensor a_int8(Shape{K}, DType::U8);
     int8_t* a_i8 = (int8_t*)a_int8.data();
-    float a_scale;
 
-    // Quantize activations per row
+    std::vector<float> scales(N);
     for (int n = 0; n < N; n++) {
         float max_abs = 0;
         for (int k = 0; k < K; k++) {
@@ -45,19 +44,19 @@ void tl1_gemm(const Tensor& weights, const Tensor& activations,
             if (abs_v > max_abs) max_abs = abs_v;
         }
         if (max_abs < 1e-10f) max_abs = 1e-10f;
-        a_scale = 127.0f / max_abs;
+        scales[n] = 127.0f / max_abs;
         for (int k = 0; k < K; k++)
-            a_i8[n * K + k] = (int8_t)std::round(a[n * K + k] * a_scale);
+            a_i8[n * K + k] = (int8_t)std::round(a[n * K + k] * scales[n]);
     }
 
     // Build LUT and compute
+    int total_lut_groups = K / 2;
+    std::vector<int8_t> lut(total_lut_groups * 9);
     for (int m = 0; m < M; m++) {
         for (int n = 0; n < N; n++) {
             const uint8_t* w_row = w + (m * N + n) * K / 4;
             const int8_t* a_row = a_i8 + n * K;
             int32_t total = 0;
-            int lut_groups = K / 2;
-            std::vector<int8_t> lut(lut_groups * 9);
 
             tl1_precompute_lut(a_row, lut.data(), K, 1.0f);
 
@@ -67,7 +66,7 @@ void tl1_gemm(const Tensor& weights, const Tensor& activations,
                 total += lut[(i / 2) * 9 + wi];
             }
 
-            ((float*)output.data())[m * N + n] = (float)total / a_scale;
+            ((float*)output.data())[m * N + n] = (float)total / scales[n];
         }
     }
 }
@@ -112,9 +111,9 @@ void tl2_gemm(const Tensor& weights, const Tensor& activations,
 
     Tensor a_int8(Shape{K}, DType::U8);
     int8_t* a_i8 = (int8_t*)a_int8.data();
-    float a_scale;
 
     // Quantize activations per row
+    std::vector<float> scales(N);
     for (int n = 0; n < N; n++) {
         float max_abs = 0;
         for (int k = 0; k < K; k++) {
@@ -122,18 +121,12 @@ void tl2_gemm(const Tensor& weights, const Tensor& activations,
             if (abs_v > max_abs) max_abs = abs_v;
         }
         if (max_abs < 1e-10f) max_abs = 1e-10f;
-        a_scale = 127.0f / max_abs;
+        scales[n] = 127.0f / max_abs;
         for (int k = 0; k < K; k++)
-            a_i8[n * K + k] = (int8_t)std::round(a[n * K + k] * a_scale);
+            a_i8[n * K + k] = (int8_t)std::round(a[n * K + k] * scales[n]);
     }
 
     // TL2 packing: 12 weights in 3 bytes, 4 groups of 3
-    // 3 weights × 2 bits = 6 bits per group
-    // Byte 0: group0[0:6] | group1[0:2]
-    // Byte 1: group1[2:6] | group2[0:4]
-    // Byte 2: group2[4:6] | group3[0:6]
-    // This gives us 6*4 = 24 bits = 3 bytes per 4 groups
-    int groups_per_triple = 4; // 12 weights packed in 3 bytes
     int bytes_per_row = (K * 2 + 7) / 8; // 2 bits per weight
 
     for (int m = 0; m < M; m++) {
@@ -142,14 +135,11 @@ void tl2_gemm(const Tensor& weights, const Tensor& activations,
             const int8_t* a_row = a_i8 + n * K;
             int64_t total = 0;
 
-            // We have K weights in TL2 format, grouped in triples
-            // 12 weights = 4 triples packed in 3 bytes
             for (int g = 0; g * 12 < K; g++) {
                 int rem = K - g * 12;
                 int n_triples = std::min(4, (rem + 2) / 3);
                 if (n_triples <= 0) break;
 
-                // Extract 12 values from 3 bytes
                 int vals[12];
                 for (int b = 0; b < 3; b++) {
                     uint8_t byte = w_row[g * 3 + b];
@@ -159,7 +149,6 @@ void tl2_gemm(const Tensor& weights, const Tensor& activations,
                     vals[b * 4 + 3] = decode_tl2(byte, 6);
                 }
 
-                // Process each triple
                 for (int t = 0; t < n_triples; t++) {
                     int base = g * 12 + t * 3;
                     int w0 = vals[t * 3 + 0];
@@ -171,7 +160,7 @@ void tl2_gemm(const Tensor& weights, const Tensor& activations,
                 }
             }
 
-            ((float*)output.data())[m * N + n] = (float)total / a_scale;
+            ((float*)output.data())[m * N + n] = (float)total / scales[n];
         }
     }
 }

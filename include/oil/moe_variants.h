@@ -28,7 +28,9 @@ enum class MoEVariant {
     EXPERT_CHOICE,
     HASH_ROUTED,
     CROSS_LAYER,
-    MULTIMODAL           // Our MoMMoE
+    MULTIMODAL,          // Our MoMMoE
+    MMOE,                // Multi-gate MoE
+    DEEPSEEK_MOE         // DeepSeek-MoE (shared + routed)
 };
 
 inline const char* moe_variant_name(MoEVariant v) {
@@ -43,6 +45,8 @@ inline const char* moe_variant_name(MoEVariant v) {
         case MoEVariant::HASH_ROUTED: return "HASH_ROUTED";
         case MoEVariant::CROSS_LAYER: return "CROSS_LAYER";
         case MoEVariant::MULTIMODAL: return "MULTIMODAL";
+        case MoEVariant::MMOE: return "MMOE";
+        case MoEVariant::DEEPSEEK_MOE: return "DEEPSEEK_MOE";
         default: return "UNKNOWN";
     }
 }
@@ -84,6 +88,14 @@ struct MoEAllConfig {
 
     // Cross-layer
     int64_t num_shared_layers = 4;
+
+    // MMoE
+    int64_t num_tasks = 1;
+
+    // DeepSeek-MoE
+    int64_t num_shared_experts = 1;
+    int64_t num_routed_experts = 8;
+    bool use_shared_expert = true;
 
     // Capacity
     CapacityStrategy capacity_strategy = CapacityStrategy::TOKEN_DROP;
@@ -295,6 +307,45 @@ public:
 };
 
 // ========================================================================
+// 9. MMoE — Multi-gate Mixture of Experts (Ma et al., KDD 2018)
+// ========================================================================
+// N task-specific gates, shared expert pool.
+// Each task gets its own routing weights from the same expert pool.
+// From: "Modeling Task Relationships in Multi-task Learning 
+//        with Multi-gate Mixture-of-Experts"
+
+class MMoE {
+public:
+    MMoE(int64_t hidden_size, const MoEAllConfig& cfg);
+    MoEOutput forward(const Tensor& x, int64_t task_id = 0);
+
+    std::vector<ExpertFFN> experts;
+    std::vector<Linear> task_gates;  // one gate per task, {hidden, num_experts}
+    MoEAllConfig config;
+    int64_t hidden_size;
+};
+
+// ========================================================================
+// 10. DeepSeek-MoE (DeepSeek, 2024)
+// ========================================================================
+// 1 always-active shared expert + K routed experts per token.
+// Bias-based routing for load balancing (no auxiliary loss).
+// From: "DeepSeekMoE: Towards Ultimate Expert Specialization"
+
+class DeepSeekMoE {
+public:
+    DeepSeekMoE(int64_t hidden_size, const MoEAllConfig& cfg);
+    MoEOutput forward(const Tensor& x, bool training = true);
+
+    ExpertFFN shared_expert;
+    std::vector<ExpertFFN> routed_experts;
+    Linear router_weight;
+    MoEAllConfig config;
+    int64_t hidden_size;
+    std::vector<float> expert_biases;  // learned biases for load balancing
+};
+
+// ========================================================================
 // Load balancing utility (shared by all variants)
 // ========================================================================
 
@@ -302,6 +353,18 @@ float compute_load_balance_loss(const Tensor& router_logits, const Tensor& exper
 float compute_z_loss(const Tensor& expert_output_norms);
 Tensor softmax_with_topk(const Tensor& logits, int64_t k, Tensor& indices_out, Tensor& weights_out);
 int64_t hash_token(int64_t token_id, int64_t range);
+
+// ========================================================================
+// Batched dispatch: groups tokens by expert, runs one forward per expert
+// Replaces token-by-token dispatch in MMoE/DeepSeekMoE/CrossLayer
+// ========================================================================
+
+Tensor moe_dispatch_batched(const Tensor& x_flat,
+                            const std::vector<ExpertFFN>& experts,
+                            const int64_t* indices, const float* weights,
+                            int64_t T, int64_t K, int64_t E, int64_t D,
+                            float* z_loss_out = nullptr,
+                            int64_t* dropped_out = nullptr);
 
 // ========================================================================
 // AVX2-optimized MoE kernels

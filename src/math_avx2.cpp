@@ -278,12 +278,18 @@ void gelu(const Tensor& x, Tensor& y) {
     int64_t i = 0;
     for (; i + 8 <= n; i += 8) {
         __m256 v = _mm256_loadu_ps(px + i);
-        __m256 arg = _mm256_mul_ps(v, sqrt2_inv);
-        alignas(32) float tmp[8], out[8];
-        _mm256_store_ps(tmp, arg);
-        for (int j = 0; j < 8; j++) out[j] = std::erf(tmp[j]);
-        __m256 erv = _mm256_load_ps(out);
-        __m256 r = _mm256_mul_ps(half, _mm256_mul_ps(v, _mm256_add_ps(one, erv)));
+        __m256 x = _mm256_mul_ps(v, sqrt2_inv);
+        __m256 x2 = _mm256_mul_ps(x, x);
+        __m256 x3 = _mm256_mul_ps(x2, x);
+        __m256 x5 = _mm256_mul_ps(x3, x2);
+        __m256 x7 = _mm256_mul_ps(x5, x2);
+        __m256 x9 = _mm256_mul_ps(x7, x2);
+        __m256 erv = _mm256_sub_ps(x, _mm256_mul_ps(x3, _mm256_set1_ps(1.0f/3.0f)));
+        erv = _mm256_add_ps(erv, _mm256_mul_ps(x5, _mm256_set1_ps(1.0f/10.0f)));
+        erv = _mm256_sub_ps(erv, _mm256_mul_ps(x7, _mm256_set1_ps(1.0f/42.0f)));
+        erv = _mm256_add_ps(erv, _mm256_mul_ps(x9, _mm256_set1_ps(1.0f/216.0f)));
+        __m256 one_point = _mm256_add_ps(one, erv);
+        __m256 r = _mm256_mul_ps(half, _mm256_mul_ps(v, one_point));
         _mm256_storeu_ps(py + i, r);
     }
     for (; i < n; i++) py[i] = 0.5f * px[i] * (1.0f + std::erf(px[i] * s));

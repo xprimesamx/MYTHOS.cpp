@@ -21,7 +21,8 @@ public:
     int greedy(const float* logits, int vocab_size);
     int sample_top_k(const float* logits, int vocab_size, int k, float temp);
     int sample_top_p(const float* logits, int vocab_size, float p, float temp);
-    int sample(const float* logits, int vocab_size, const SamplerConfig& cfg);
+    int sample(const float* logits, int vocab_size, const SamplerConfig& cfg,
+               const std::vector<int>& prev_tokens = {});
 
     void apply_temperature(float* logits, int n, float temp) const;
     void apply_repetition_penalty(float* logits, int n,

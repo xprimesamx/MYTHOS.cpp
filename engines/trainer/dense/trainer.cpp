@@ -72,6 +72,7 @@ void DenseTrainer::compile(const TrainConfig& cfg) {
 }
 
 float DenseTrainer::train_step(const Tensor& input_ids, const Tensor& labels) {
+    zero_grad();
     auto cfg = model_->config;
     int64_t B = input_ids.dim(0);
     int64_t T = input_ids.dim(1);

@@ -3,6 +3,7 @@
 #include "oil/kernel.h"
 #include <cmath>
 #include <cstring>
+#include <cfloat>
 
 #include <unordered_set>
 #include <cstring>
@@ -286,6 +287,67 @@ private:
     Tensor cos_cached_, sin_cached_;
 };
 
+#if defined(OIL_AVX2) || defined(__AVX2__)
+#include <immintrin.h>
+#endif
+
+static void softmax_forward_avx2(float* output, const float* input, int64_t cols) {
+    int64_t i;
+    float max_val = -FLT_MAX;
+    for (i = 0; i < cols; i++) {
+        if (input[i] > max_val) max_val = input[i];
+    }
+
+    float sum_exp = 0;
+#if defined(OIL_AVX2) || defined(__AVX2__)
+    __m256 sumv = _mm256_setzero_ps();
+    __m256 max_bc = _mm256_set1_ps(max_val);
+    for (i = 0; i + 8 <= cols; i += 8) {
+        __m256 v = _mm256_loadu_ps(input + i);
+        v = _mm256_sub_ps(v, max_bc);
+        __m256 x = v;
+        __m256 result = _mm256_set1_ps(1.0f);
+        __m256 term = x;
+        result = _mm256_add_ps(result, term);
+        term = _mm256_mul_ps(term, x);
+        result = _mm256_add_ps(result, _mm256_mul_ps(term, _mm256_set1_ps(1.0f/2.0f)));
+        term = _mm256_mul_ps(term, x);
+        result = _mm256_add_ps(result, _mm256_mul_ps(term, _mm256_set1_ps(1.0f/6.0f)));
+        term = _mm256_mul_ps(term, x);
+        result = _mm256_add_ps(result, _mm256_mul_ps(term, _mm256_set1_ps(1.0f/24.0f)));
+        _mm256_storeu_ps(output + i, result);
+        sumv = _mm256_add_ps(sumv, result);
+    }
+    float hsum[8];
+    _mm256_storeu_ps(hsum, sumv);
+    sum_exp = hsum[0] + hsum[1] + hsum[2] + hsum[3] + hsum[4] + hsum[5] + hsum[6] + hsum[7];
+#else
+    for (i = 0; i < cols; i++) {
+        float e = expf(input[i] - max_val);
+        output[i] = e;
+        sum_exp += e;
+    }
+#endif
+    for (; i < cols; i++) {
+        float e = expf(input[i] - max_val);
+        output[i] = e;
+        sum_exp += e;
+    }
+
+    float inv_sum = 1.0f / sum_exp;
+#if defined(OIL_AVX2) || defined(__AVX2__)
+    __m256 inv = _mm256_set1_ps(inv_sum);
+    for (i = 0; i + 8 <= cols; i += 8) {
+        __m256 v = _mm256_loadu_ps(output + i);
+        v = _mm256_mul_ps(v, inv);
+        _mm256_storeu_ps(output + i, v);
+    }
+#endif
+    for (; i < cols; i++) {
+        output[i] *= inv_sum;
+    }
+}
+
 // ========================================================================
 // ScaledDotProductAttentionFunction: Q @ K^T / sqrt(D) -> softmax -> @ V
 // Q: {B, H, S, D}, K/V: {B, KV_H, S_full, D}
@@ -343,17 +405,7 @@ public:
                 int64_t h_base = (b * H_ + h) * S_ * S_full_;
                 for (int64_t s = 0; s < S_; s++) {
                     int64_t row = h_base + s * S_full_;
-                    float max_v = -INFINITY;
-                    for (int64_t t = 0; t < S_full_; t++)
-                        if (sd[row + t] > max_v) max_v = sd[row + t];
-                    float sum_exp = 0;
-                    for (int64_t t = 0; t < S_full_; t++) {
-                        float e = std::exp(sd[row + t] - max_v);
-                        wd[row + t] = e;
-                        sum_exp += e;
-                    }
-                    for (int64_t t = 0; t < S_full_; t++)
-                        wd[row + t] /= sum_exp;
+                    softmax_forward_avx2(wd + row, sd + row, S_full_);
                 }
             }
         }
@@ -753,12 +805,11 @@ Tensor AutogradEngine::cross_entropy_op(const Tensor& logits, const Tensor& labe
     auto outputs = fn->forward({logits, labels});
     Tensor& loss = outputs[0];
 
-    auto node = std::make_shared<AutogradNode>();
-    node->fn = fn;
-    node->inputs = {logits, labels};
-    node->outputs = {loss};
-
     if (enabled_) {
+        auto node = std::make_shared<AutogradNode>();
+        node->fn = fn;
+        node->inputs = {logits, labels};
+        node->outputs = {loss};
         loss.requires_grad(true);
         instance().register_node(node);
     }
@@ -1148,10 +1199,24 @@ void AutogradEngine::register_parameter(Tensor* p) {
 }
 
 void AutogradEngine::register_node(const std::shared_ptr<AutogradNode>& node) {
+    if (next_is_checkpoint_) {
+        node->checkpoint = true;
+        node->fn->saved.clear();
+        next_is_checkpoint_ = false;
+        last_checkpoint_ = node;
+    }
     nodes_.push_back(node);
     for (auto& out : node->outputs) {
         output_to_node_[out.data()] = node;
     }
+}
+
+void AutogradEngine::set_checkpoint() {
+    instance().next_is_checkpoint_ = true;
+}
+
+bool AutogradEngine::is_checkpoint() {
+    return instance().next_is_checkpoint_;
 }
 
 void AutogradEngine::backward(Tensor& loss) {
@@ -1180,20 +1245,32 @@ void AutogradEngine::backward(Tensor& loss) {
     std::unordered_map<void*, Tensor> accum;
     accum[loss.data()] = loss.grad();
 
-    std::function<void(const Tensor&)> dfs = [&](const Tensor& t) {
-        void* ptr = const_cast<void*>(t.data());
+    std::vector<const Tensor*> stack;
+    std::unordered_set<const Tensor*> visited;
+    stack.push_back(&loss);
+
+    while (!stack.empty()) {
+        const Tensor* t = stack.back();
+        void* ptr = const_cast<void*>(t->data());
         auto pit = pending.find(ptr);
-        if (pit == pending.end()) return;
+        if (pit == pending.end()) { stack.pop_back(); continue; }
         pit->second--;
-        if (pit->second > 0) return;
+        if (pit->second > 0) { stack.pop_back(); continue; }
 
         auto nit = output_to_node_.find(ptr);
-        if (nit == output_to_node_.end() || nit->second.expired()) return;
+        if (nit == output_to_node_.end() || nit->second.expired()) { stack.pop_back(); continue; }
         auto node = nit->second.lock();
 
+        // Gradient checkpointing: re-run forward to regenerate intermediate values
+        if (node->checkpoint && node->fn->saved.empty()) {
+            node->fn->forward(node->inputs);
+        }
+
         auto ait = accum.find(ptr);
-        if (ait == accum.end()) return;
+        if (ait == accum.end()) { stack.pop_back(); continue; }
         auto grad_outputs = node->fn->backward({ ait->second });
+
+        stack.pop_back();
 
         for (size_t i = 0; i < node->inputs.size() && i < grad_outputs.size(); ++i) {
             Tensor& inp = node->inputs[i];
@@ -1222,10 +1299,12 @@ void AutogradEngine::backward(Tensor& loss) {
                 aait->second = tmp;
             }
 
-            dfs(inp);
+            if (visited.find(&inp) == visited.end()) {
+                visited.insert(&inp);
+                stack.push_back(&inp);
+            }
         }
-    };
-    dfs(loss);
+    }
 }
 
 void AutogradEngine::clear() {

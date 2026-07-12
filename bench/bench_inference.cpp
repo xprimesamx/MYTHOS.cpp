@@ -18,6 +18,16 @@ static double now_sec() {
     return std::chrono::duration<double>(t.time_since_epoch()).count();
 }
 
+// NOTE: For real inference speed measurements, load a trained model checkpoint:
+//   oil::Tokenizer tokenizer("tokenizer.bin");
+//   oil::DenseModel model("model.oil");
+//   oil::Generator generator(&model, &tokenizer);
+//   auto t0 = now_sec();
+//   std::string output = generator.generate("prompt", 256);
+//   double dt = now_sec() - t0;
+//   double tok_s = 256.0 / dt;
+// This file benchmarks synthetic random models for forward-pass latency.
+
 int main() {
     std::cout << "=== OIL Inference Benchmarks ===" << std::endl;
 

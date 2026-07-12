@@ -32,7 +32,8 @@ QuantizeParams quantize_tensor(const Tensor& src, Tensor& dst) {
     if (dst.dtype() == DType::U8) {
         uint8_t* dst_data = dst.data<uint8_t>();
         for (int64_t i = 0; i < n; i++) {
-            dst_data[i] = static_cast<uint8_t>(std::round(src_data[i] * params.scale));
+            float val = src_data[i] * params.scale;
+            dst_data[i] = static_cast<uint8_t>(std::clamp(std::round(val), 0.0f, 255.0f));
         }
     } else if (dst.dtype() == DType::F32) {
         float* dst_data = dst.data<float>();
@@ -102,19 +103,18 @@ void quantize_ternary_block(const float* src, uint8_t* dst, float* scale, int n)
     float threshold = 0.577f * max_abs;
     float sum_abs = 0.0f;
     int non_zero_count = 0;
-    int ternary[256];
-    int count = (std::min)(n, 256);
+    std::vector<int> ternary(n);
 
     for (int i = 0; i < n; i++) {
         float v = src[i];
         if (std::abs(v) < threshold) {
             ternary[i] = 0;
         } else if (v > 0) {
-            ternary[i] = 2;
+            ternary[i] = 1;
             sum_abs += v;
             non_zero_count++;
         } else {
-            ternary[i] = 0;
+            ternary[i] = 2;
             sum_abs += -v;
             non_zero_count++;
         }
@@ -156,12 +156,12 @@ void dequantize_ternary_block(const uint8_t* src, float* dst, float scale, int n
         for (int j = 0; j < 4 && (i + j) < n; j++) {
             int t = (byte >> (2 * j)) & 0x03;
             float val;
-            if (t >= 2) {
-                val = scale;
-            } else if (t == 0) {
-                val = -scale;
-            } else {
+            if (t == 0) {
                 val = 0.0f;
+            } else if (t == 1) {
+                val = scale;
+            } else {
+                val = -scale;
             }
             dst[i + j] = val;
         }

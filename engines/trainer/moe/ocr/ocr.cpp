@@ -10,6 +10,7 @@ OCREncoder::OCREncoder(int64_t hidden, int64_t num_layers, int64_t num_heads)
 {
     conv_proj = Tensor({3 * 16 * 16, hidden});
     conv_proj.zero_();
+    pos_embed = Tensor::zeros(Shape{1024, hidden});
 
     TransformerConfig tcfg;
     tcfg.hidden_size = hidden;

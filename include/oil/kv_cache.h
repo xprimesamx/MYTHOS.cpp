@@ -34,11 +34,24 @@ public:
     // Resize cache
     void resize(int64_t new_max_seq_len);
     
+    static constexpr int FP8_BLOCK_SIZE = 64;
+    static constexpr float FP8_MAX = 127.0f;
+
+    static void quantize_fp8_block(const float* src, uint8_t* dst, float* scale,
+                                    int64_t n);
+    static void dequantize_fp8_block(const uint8_t* src, float scale,
+                                      float* dst, int64_t n);
+
 private:
     struct LayerCache {
         Tensor k;
         Tensor v;
         int current_pos = 0;
+        // Quantized storage (used only when quantized_ == true)
+        std::vector<uint8_t> k_quant;
+        std::vector<uint8_t> v_quant;
+        std::vector<float> k_scales;
+        std::vector<float> v_scales;
     };
     std::vector<LayerCache> caches_;
     int num_layers_ = 0;

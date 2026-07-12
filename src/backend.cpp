@@ -75,10 +75,14 @@ public:
         int M = (int)A.numel() / (int)A.dim(A.rank() - 1);
         int K = (int)A.dim(A.rank() - 1);
         int N = (int)B.dim(B.rank() - 1);
+        Tensor C_orig;
+        if (beta != 0.0f) C_orig.copy_from(C);
         kernel::avx2_gemm(A.data<float>(), B.data<float>(), C.data<float>(), M, N, K);
         if (beta != 0.0f) {
             float* cd = C.data<float>();
-            for (int64_t i = 0; i < C.numel(); ++i) cd[i] = alpha * cd[i] + (beta != 1.0f ? beta * cd[i] : 0);
+            const float* cod = C_orig.data<float>();
+            for (int64_t i = 0; i < C.numel(); ++i)
+                cd[i] = alpha * cd[i] + beta * cod[i];
         }
     }
 
@@ -238,11 +242,70 @@ public:
 // GPU DIRECTX BACKEND (dedicated GPU)
 // ========================================================================
 
-class GPUDirectXBackend : public IGPUSharedBackend {
+class GPUDirectXBackend : public ComputeBackend {
+    gpu::DirectXCompute* dx_ = nullptr;
 public:
+    GPUDirectXBackend() {
+        try {
+            dx_ = &gpu::get_dx_compute();
+        } catch (...) {}
+    }
     BackendType type() const override { return BackendType::GPU_DIRECTX; }
     const char* name() const override { return "GPU_DIRECTX"; }
-    bool is_available() const override { return is_directx_available(); }
+
+    void gemm(float alpha, const Tensor& A, const Tensor& B, float beta, Tensor& C) override {
+        if (!dx_ || !dx_->is_initialized()) {
+            int M = (int)(A.numel() / A.dim(A.rank() - 1));
+            int K = (int)A.dim(A.rank() - 1);
+            int N = (int)B.dim(B.rank() - 1);
+    #if defined(OIL_AVX2)
+            kernel::avx2_gemm(A.data<float>(), B.data<float>(), C.data<float>(), M, N, K);
+    #else
+            math::gemm(alpha, A, B, beta, C);
+    #endif
+            if (beta != 0.0f) {
+                float* cd = C.data<float>();
+                for (int64_t i = 0; i < C.numel(); ++i) cd[i] = alpha * cd[i] + beta * cd[i];
+            }
+            return;
+        }
+        void* dA = dx_->allocate(A.numel() * sizeof(float));
+        void* dB = dx_->allocate(B.numel() * sizeof(float));
+        void* dC = dx_->allocate(C.numel() * sizeof(float));
+        dx_->upload(A, dA);
+        dx_->upload(B, dB);
+        if (beta != 0.0f) dx_->upload(C, dC);
+        dx_->gemm(alpha, dA, dB, beta, dC, A.dim(A.rank() - 1), B.dim(B.rank() - 1), A.dim(A.rank() - 1));
+        dx_->download(dC, C);
+        dx_->free(dA);
+        dx_->free(dB);
+        dx_->free(dC);
+    }
+    void gemv(float alpha, const Tensor& A, const Tensor& x, float beta, Tensor& y) override {
+        math::gemv(alpha, A, x, beta, y);
+    }
+    void softmax(const Tensor& x, Tensor& y, int axis) override { math::softmax(x, y, axis); }
+    void layer_norm(const Tensor& x, const Tensor& g, const Tensor& bt, float e, Tensor& y) override { math::layer_norm(x, g, bt, e, y); }
+    void rms_norm(const Tensor& x, const Tensor& g, float e, Tensor& y) override { math::rms_norm(x, g, e, y); }
+    void relu(const Tensor& x, Tensor& y) override { math::relu(x, y); }
+    void gelu(const Tensor& x, Tensor& y) override { math::gelu(x, y); }
+    void silu(const Tensor& x, Tensor& y) override { math::silu(x, y); }
+    void add(const Tensor& a, const Tensor& b, Tensor& c) override { math::add(a, b, c); }
+    void mul(const Tensor& a, const Tensor& b, Tensor& c) override { math::mul(a, b, c); }
+    void scale(float s, const Tensor& x, Tensor& y) override { math::scale(s, x, y); }
+    void copy(const Tensor& src, Tensor& dst) override { dst.copy_from(src); }
+    void fill(Tensor& t, float val) override { t.fill(val); }
+    void zero(Tensor& t) override { t.zero_(); }
+
+    bool is_available() const override { return dx_ && dx_->is_initialized(); }
+    int64_t memory_free() const override { return dx_ ? dx_->memory_free() : cpu_memory_free(); }
+    int64_t memory_total() const override {
+        MEMORYSTATUSEX mem;
+        mem.dwLength = sizeof(mem);
+        GlobalMemoryStatusEx(&mem);
+        return (int64_t)mem.ullTotalPhys;
+    }
+    void synchronize() override { if (dx_) dx_->synchronize(); }
 };
 
 // ========================================================================
@@ -439,7 +502,14 @@ int64_t cpu_memory_free() {
 
 int64_t gpu_memory_free(int64_t device_id) {
     (void)device_id;
-    return 0;
+    if (is_directx_available()) {
+        try {
+            auto& dx = gpu::get_dx_compute();
+            if (dx.is_initialized())
+                return dx.memory_free();
+        } catch (...) {}
+    }
+    return cpu_memory_free();
 }
 
 int64_t igpu_memory_free() {
@@ -450,12 +520,14 @@ int64_t igpu_memory_free() {
 }
 
 Tensor to_backend(const Tensor& t, BackendType dst) {
-    (void)dst;
+    if (dst == BackendType::CPU_SCALAR || dst == BackendType::CPU_AVX2)
+        return t;
     return t;
 }
 
 Tensor from_backend(const Tensor& t, BackendType src) {
-    (void)src;
+    if (src == BackendType::CPU_SCALAR || src == BackendType::CPU_AVX2)
+        return t;
     return t;
 }
 

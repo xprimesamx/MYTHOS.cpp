@@ -4,6 +4,7 @@
 #include <cstring>
 #include <cmath>
 #include <cstdint>
+#include <immintrin.h>
 
 namespace oil {
 namespace kernel {
@@ -14,7 +15,6 @@ static float fp16_to_float(uint16_t h) {
     uint32_t exp = (h >> 10) & 0x1f;
     uint32_t mant = h & 0x3ff;
     if (exp == 0) {
-        // Subnormal
         float v = (float)mant * 0.000000059604644775390625f;
         return sign ? -v : v;
     } else if (exp == 31) {
@@ -26,32 +26,98 @@ static float fp16_to_float(uint16_t h) {
     return result;
 }
 
-void oil4_gemm(const uint8_t* packed_indices, const uint16_t* codebook,
-               const float* activations, float* output,
-               int M, int N, int K) {
+static void oil4_gemm_scalar(const uint8_t* packed_indices, const uint16_t* codebook,
+                              const float* activations, float* output,
+                              int M, int N, int K) {
     float f16_centroids[16];
-    for (int i = 0; i < 16; i++) {
+    for (int i = 0; i < 16; i++)
         f16_centroids[i] = fp16_to_float(codebook[i]);
-    }
-    
+
     for (int m = 0; m < M; m++) {
         for (int n = 0; n < N; n++) {
             float sum = 0;
-            const uint8_t* w_row = packed_indices + (m * N + n) * K / 2;
-            const float* a_row = activations + n * K;
+            const uint8_t* w_row = packed_indices + ((int64_t)m * N + n) * K / 2;
+            const float* a_row = activations + (int64_t)n * K;
             for (int k = 0; k < K; k++) {
                 uint8_t idx;
-                if (k % 2 == 0) {
-                    idx = (w_row[k / 2] >> 4) & 0xF;
-                } else {
+                if (k % 2 == 0)
                     idx = w_row[k / 2] & 0xF;
-                }
-                float w = f16_centroids[idx];
-                sum += w * a_row[k];
+                else
+                    idx = (w_row[k / 2] >> 4) & 0xF;
+                sum += f16_centroids[idx] * a_row[k];
             }
             output[m * N + n] = sum;
         }
     }
+}
+
+static void oil4_gemm_avx2(const uint8_t* packed_indices, const uint16_t* codebook,
+                            const float* activations, float* output,
+                            int M, int N, int K) {
+    float f16_centroids[16];
+    for (int i = 0; i < 16; i++)
+        f16_centroids[i] = fp16_to_float(codebook[i]);
+
+    __m256 cb_full = _mm256_loadu_ps(f16_centroids);
+
+    for (int m = 0; m < M; m++) {
+        for (int n = 0; n < N; n++) {
+            __m256 sum8 = _mm256_setzero_ps();
+            int k = 0;
+            for (; k + 16 <= K; k += 16) {
+                const uint8_t* w = packed_indices + ((int64_t)m * N + n) * K / 2 + k / 2;
+                const float* a = activations + (int64_t)n * K + k;
+
+                __m128i packed = _mm_loadl_epi64((const __m128i*)w);
+                __m128i lo = _mm_and_si128(packed, _mm_set1_epi8(0xF));
+                __m128i hi = _mm_and_si128(_mm_srli_epi16(packed, 4), _mm_set1_epi8(0xF));
+                __m128i idx_even = _mm_unpacklo_epi8(lo, hi);
+                __m128i idx_odd = _mm_unpackhi_epi8(lo, hi);
+                __m256i idx0 = _mm256_cvtepu8_epi32(idx_even);
+                __m256i idx1 = _mm256_cvtepu8_epi32(_mm_srli_si128(idx_even, 8));
+                __m256i idx2 = _mm256_cvtepu8_epi32(idx_odd);
+                __m256i idx3 = _mm256_cvtepu8_epi32(_mm_srli_si128(idx_odd, 8));
+
+                __m256 w0 = _mm256_i32gather_ps(f16_centroids, idx0, 4);
+                __m256 w1 = _mm256_i32gather_ps(f16_centroids, idx1, 4);
+                __m256 w2 = _mm256_i32gather_ps(f16_centroids, idx2, 4);
+                __m256 w3 = _mm256_i32gather_ps(f16_centroids, idx3, 4);
+
+                __m256 a0 = _mm256_loadu_ps(a);
+                __m256 a1 = _mm256_loadu_ps(a + 8);
+                __m256 a2 = _mm256_loadu_ps(a);
+                __m256 a3 = _mm256_loadu_ps(a + 8);
+
+                sum8 = _mm256_fmadd_ps(w0, a0, sum8);
+                sum8 = _mm256_fmadd_ps(w1, a1, sum8);
+                sum8 = _mm256_fmadd_ps(w2, a2, sum8);
+                sum8 = _mm256_fmadd_ps(w3, a3, sum8);
+            }
+            __m128 hi = _mm256_extractf128_ps(sum8, 1);
+            __m128 lo = _mm256_castps256_ps128(sum8);
+            __m128 sum4 = _mm_add_ps(lo, hi);
+            sum4 = _mm_hadd_ps(sum4, sum4);
+            sum4 = _mm_hadd_ps(sum4, sum4);
+            float result = _mm_cvtss_f32(sum4);
+            for (; k < K; k++) {
+                const uint8_t* w = packed_indices + ((int64_t)m * N + n) * K / 2;
+                const float* a_row = activations + (int64_t)n * K;
+                uint8_t idx = (k % 2 == 0) ? (w[k / 2] & 0xF) : ((w[k / 2] >> 4) & 0xF);
+                result += f16_centroids[idx] * a_row[k];
+            }
+            output[m * N + n] = result;
+        }
+    }
+}
+
+void oil4_gemm(const uint8_t* packed_indices, const uint16_t* codebook,
+               const float* activations, float* output,
+               int M, int N, int K) {
+#if defined(__AVX2__)
+    oil4_gemm_avx2(packed_indices, codebook, activations, output, M, N, K);
+#else
+    oil4_gemm_scalar(packed_indices, codebook, activations, output, M, N, K);
+#endif
 }
 
 } // namespace kernel

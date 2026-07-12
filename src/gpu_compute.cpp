@@ -1,5 +1,34 @@
 #include "oil/gpu_compute.h"
 
+#ifdef OIL_HAS_CUDA
+#include <cuda_runtime.h>
+#include <cublas_v2.h>
+// Forward declarations of CUDA kernels
+void launch_cuda_softmax(float* y, const float* x, int rows, int cols);
+void launch_cuda_layernorm(float* y, const float* x, const float* gamma,
+                            const float* beta, float eps, int n, int d);
+void launch_cuda_rmsnorm(float* y, const float* x, const float* gamma,
+                          float eps, int n, int d);
+void launch_cuda_relu(float* y, const float* x, int n);
+void launch_cuda_gelu(float* y, const float* x, int n);
+void launch_cuda_silu(float* y, const float* x, int n);
+void launch_cuda_add(float* c, const float* a, const float* b, int n);
+void launch_cuda_mul(float* c, const float* a, const float* b, int n);
+void launch_cuda_scale(float* y, const float* x, float s, int n);
+void launch_cuda_embedding(float* out, const float* table,
+                            const int* indices, int B, int S, int D);
+
+// cuBLAS convenience wrapper
+static inline cublasStatus_t cublas_gemm(cublasHandle_t handle, int M, int N, int K,
+                                          float alpha, const float* A, const float* B,
+                                          float beta, float* C) {
+    return cublasGemmEx(handle, CUBLAS_OP_N, CUBLAS_OP_N,
+                        N, M, K, &alpha, B, CUDA_R_32F, N,
+                        A, CUDA_R_32F, K, &beta, C, CUDA_R_32F, N,
+                        CUBLAS_COMPUTE_32F, CUBLAS_GEMM_DEFAULT);
+}
+#endif
+
 #if defined(OIL_USE_DIRECTX)
 #define WIN32_LEAN_AND_MEAN
 #define NOMINMAX
@@ -180,6 +209,73 @@ void main(uint3 tid : SV_DispatchThreadID) {
     float rms = rsqrt(ss / (float)D + eps);
     for (uint d = 0; d < D; ++d)
         y[r * D + d] = rms * x[r * D + d] * gamma[d];
+}
+)";
+
+static const char* HLSL_LAYER_NORM = R"(
+RWStructuredBuffer<float> y : register(u0);
+StructuredBuffer<float> x : register(t0);
+StructuredBuffer<float> gamma : register(t1);
+StructuredBuffer<float> beta : register(t2);
+cbuffer Params : register(b0) { uint N, D; float eps; };
+groupshared float buf[256];
+[numthreads(256, 1, 1)]
+void main(uint3 tid : SV_DispatchThreadID) {
+    if (tid.x >= N) return;
+    uint r = tid.x;
+    float sum = 0.0f;
+    for (uint d = 0; d < D; ++d)
+        sum += x[r * D + d];
+    float mean = sum / (float)D;
+    float var = 0.0f;
+    for (uint d = 0; d < D; ++d) {
+        float diff = x[r * D + d] - mean;
+        var += diff * diff;
+    }
+    float inv_std = rsqrt(var / (float)D + eps);
+    for (uint d = 0; d < D; ++d)
+        y[r * D + d] = (x[r * D + d] - mean) * inv_std * gamma[d] + beta[d];
+}
+)";
+
+static const char* HLSL_MOE_GATHER = R"(
+RWStructuredBuffer<float> out_buf : register(u0);
+StructuredBuffer<float> expert_out : register(t0);
+StructuredBuffer<int64_t> indices : register(t1);
+StructuredBuffer<float> weights : register(t2);
+cbuffer Params : register(b0) { uint T, K, D; };
+[numthreads(256, 1, 1)]
+void main(uint3 tid : SV_DispatchThreadID) {
+    uint t = tid.x / D;
+    uint d = tid.x % D;
+    if (t >= T || d >= D) return;
+    float sum = 0.0f;
+    for (uint k = 0; k < K; ++k) {
+        int64_t e = indices[t * K + k];
+        float w = weights[t * K + k];
+        sum += w * expert_out[(uint)e * T * D + t * D + d];
+    }
+    out_buf[t * D + d] = sum;
+}
+)";
+
+static const char* HLSL_MOE_SCATTER_ADD = R"(
+RWStructuredBuffer<float> expert_grad : register(u0);
+StructuredBuffer<float> grad_in : register(t0);
+StructuredBuffer<int64_t> indices : register(t1);
+StructuredBuffer<float> weights : register(t2);
+cbuffer Params : register(b0) { uint T, K, D, E; };
+[numthreads(256, 1, 1)]
+void main(uint3 tid : SV_DispatchThreadID) {
+    uint t = tid.x / D;
+    uint d = tid.x % D;
+    if (t >= T || d >= D) return;
+    float g = grad_in[t * D + d];
+    for (uint k = 0; k < K; ++k) {
+        int64_t e = indices[t * K + k];
+        float w = weights[t * K + k];
+        expert_grad[(uint)e * D + d] += g * w;
+    }
 }
 )";
 
@@ -825,15 +921,40 @@ void DirectXCompute::rms_norm(const void* x, const void* gamma, void* y, float e
 }
 
 void DirectXCompute::layer_norm(const void* x, const void* gamma, const void* beta, void* y, float eps, int64_t n, int64_t d) {
-    rms_norm(x, gamma, y, eps, n, d);
+#if defined(OIL_USE_DIRECTX) || !defined(OIL_NO_DIRECTX_FALLBACK)
+    uint32_t eps_bits;
+    std::memcpy(&eps_bits, &eps, 4);
+    std::vector<uint32_t> constants = { (uint32_t)n, (uint32_t)d, eps_bits, 0,0,0,0,0 };
+    uint32_t groups = (uint32_t)((n + 255) / 256);
+    impl_->execute("layer_norm", HLSL_LAYER_NORM, "main", (void*)y,
+                   {(void*)x, (void*)gamma, (void*)beta}, constants, groups);
+#else
+    (void)x; (void)gamma; (void)beta; (void)y; (void)eps; (void)n; (void)d;
+#endif
 }
 
 void DirectXCompute::moe_gather(const void* x, const int64_t* indices, const float* weights,
                                  void* out, int64_t T, int64_t K, int64_t D) {
+#if defined(OIL_USE_DIRECTX) || !defined(OIL_NO_DIRECTX_FALLBACK)
+    std::vector<uint32_t> constants = { (uint32_t)T, (uint32_t)K, (uint32_t)D, 0,0,0,0,0 };
+    uint32_t groups = (uint32_t)((T * D + 255) / 256);
+    impl_->execute("moe_gather", HLSL_MOE_GATHER, "main", (void*)out,
+                   {(void*)x, (void*)indices, (void*)weights}, constants, groups);
+#else
+    (void)x; (void)indices; (void)weights; (void)out; (void)T; (void)K; (void)D;
+#endif
 }
 
 void DirectXCompute::moe_scatter_add(void* out, const int64_t* indices, const float* weights,
-                                      const void* expert_out, int64_t T, int64_t K, int64_t D) {
+                                       const void* expert_out, int64_t T, int64_t K, int64_t D) {
+#if defined(OIL_USE_DIRECTX) || !defined(OIL_NO_DIRECTX_FALLBACK)
+    std::vector<uint32_t> constants = { (uint32_t)T, (uint32_t)K, (uint32_t)D, 0,0,0,0,0 };
+    uint32_t groups = (uint32_t)((T * D + 255) / 256);
+    impl_->execute("moe_scatter_add", HLSL_MOE_SCATTER_ADD, "main", (void*)out,
+                   {(void*)expert_out, (void*)indices, (void*)weights}, constants, groups);
+#else
+    (void)out; (void)indices; (void)weights; (void)expert_out; (void)T; (void)K; (void)D;
+#endif
 }
 
 void DirectXCompute::synchronize() {
@@ -857,27 +978,161 @@ int64_t DirectXCompute::memory_total() const {
 }
 
 // ========================================================================
-// CUDA Backend (stub if no CUDA)
+// CUDA Backend — proper implementation with conditional compilation
 // ========================================================================
 
 struct CUDABackend::Impl {
     bool initialized = false;
+#ifdef OIL_HAS_CUDA
+    cudaDeviceProp device_prop_;
+    void* cublas_handle_ = nullptr;
+    std::unordered_map<void*, size_t> allocations_;
+#endif
 };
 
 CUDABackend::CUDABackend() : impl_(new Impl) {}
-CUDABackend::~CUDABackend() {}
+CUDABackend::~CUDABackend() { shutdown(); }
 
-bool CUDABackend::init(int64_t) { return false; }
+bool CUDABackend::init(int64_t device_id) {
+#ifdef OIL_HAS_CUDA
+    cudaError_t err = cudaSetDevice((int)device_id);
+    if (err != cudaSuccess) return false;
+    err = cudaGetDeviceProperties(&impl_->device_prop_, (int)device_id);
+    if (err != cudaSuccess) return false;
+    cublasCreate((cublasHandle_t*)&impl_->cublas_handle_);
+    impl_->initialized = true;
+    return true;
+#else
+    return false;
+#endif
+}
+
 bool CUDABackend::is_initialized() const { return impl_->initialized; }
-void CUDABackend::shutdown() {}
 
-void* CUDABackend::allocate(size_t) { return nullptr; }
-void CUDABackend::free(void*) {}
-void CUDABackend::upload(const Tensor&, void*) {}
-void CUDABackend::download(void*, Tensor&) {}
-void CUDABackend::gemm(float, const void*, const void*, float, void*, int64_t, int64_t, int64_t) {}
-void CUDABackend::softmax(const void*, void*, int64_t, int64_t) {}
-void CUDABackend::synchronize() {}
+void CUDABackend::shutdown() {
+#ifdef OIL_HAS_CUDA
+    if (impl_->cublas_handle_) {
+        cublasDestroy((cublasHandle_t)impl_->cublas_handle_);
+        impl_->cublas_handle_ = nullptr;
+    }
+    for (auto& [ptr, sz] : impl_->allocations_)
+        cudaFree(ptr);
+    impl_->allocations_.clear();
+#endif
+    impl_->initialized = false;
+}
+
+void* CUDABackend::allocate(size_t bytes) {
+#ifdef OIL_HAS_CUDA
+    void* ptr = nullptr;
+    cudaError_t err = cudaMalloc(&ptr, bytes);
+    if (err != cudaSuccess) return nullptr;
+    impl_->allocations_[ptr] = bytes;
+    return ptr;
+#else
+    return nullptr;
+#endif
+}
+
+void CUDABackend::free(void* ptr) {
+#ifdef OIL_HAS_CUDA
+    impl_->allocations_.erase(ptr);
+    cudaFree(ptr);
+#endif
+}
+
+void CUDABackend::upload(const Tensor& src, void* dst) {
+#ifdef OIL_HAS_CUDA
+    cudaMemcpy(dst, src.data(), src.size_bytes(), cudaMemcpyHostToDevice);
+#endif
+}
+
+void CUDABackend::download(void* src, Tensor& dst) {
+#ifdef OIL_HAS_CUDA
+    cudaMemcpy(dst.data(), src, dst.size_bytes(), cudaMemcpyDeviceToHost);
+#endif
+}
+
+void CUDABackend::gemm(float alpha, const void* A, const void* B, float beta,
+                        void* C, int64_t M, int64_t N, int64_t K) {
+#ifdef OIL_HAS_CUDA
+    cublasHandle_t handle = (cublasHandle_t)impl_->cublas_handle_;
+    float alpha_f = alpha, beta_f = beta;
+    cublasGemmEx(handle, CUBLAS_OP_N, CUBLAS_OP_N,
+                 (int)N, (int)M, (int)K,
+                 &alpha_f, B, CUDA_R_32F, (int)N,
+                 A, CUDA_R_32F, (int)K,
+                 &beta_f, C, CUDA_R_32F, (int)N,
+                 CUBLAS_COMPUTE_32F, CUBLAS_GEMM_DEFAULT);
+#endif
+}
+
+void CUDABackend::softmax(const void* x, void* y, int64_t rows, int64_t cols) {
+#ifdef OIL_HAS_CUDA
+    launch_cuda_softmax((float*)y, (const float*)x, (int)rows, (int)cols);
+#endif
+}
+
+void CUDABackend::synchronize() {
+#ifdef OIL_HAS_CUDA
+    cudaDeviceSynchronize();
+#endif
+}
+
+// E13: GPU profiler
+class GPUProfiler {
+public:
+    GPUProfiler() {
+#ifdef OIL_HAS_CUDA
+        cudaEventCreate(&start_);
+        cudaEventCreate(&end_);
+#endif
+    }
+    ~GPUProfiler() {
+#ifdef OIL_HAS_CUDA
+        cudaEventDestroy(start_);
+        cudaEventDestroy(end_);
+#endif
+    }
+    void begin() {
+#ifdef OIL_HAS_CUDA
+        cudaEventRecord(start_);
+#endif
+    }
+    float end() {
+#ifdef OIL_HAS_CUDA
+        cudaEventRecord(end_);
+        cudaEventSynchronize(end_);
+        float ms = 0;
+        cudaEventElapsedTime(&ms, start_, end_);
+        return ms;
+#else
+        return 0;
+#endif
+    }
+private:
+#ifdef OIL_HAS_CUDA
+    cudaEvent_t start_, end_;
+#endif
+};
+
+// E12: Multi-GPU support
+static std::vector<CUDABackend*> g_multi_gpu;
+
+void init_multi_gpu(int count) {
+#ifdef OIL_HAS_CUDA
+    for (int i = 0; i < count; i++) {
+        auto* bk = new CUDABackend();
+        if (bk->init(i)) g_multi_gpu.push_back(bk);
+        else delete bk;
+    }
+#endif
+}
+
+CUDABackend* get_device(int idx) {
+    if (idx >= 0 && idx < (int)g_multi_gpu.size()) return g_multi_gpu[idx];
+    return nullptr;
+}
 
 // ========================================================================
 // GPU autodetection and factory

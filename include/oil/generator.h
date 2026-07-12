@@ -4,6 +4,7 @@
 #include "oil/model.h"
 #include "oil/sampler.h"
 #include "oil/tokenizer.h"
+#include "oil/kv_cache.h"
 #include <vector>
 #include <string>
 #include <functional>
@@ -40,6 +41,7 @@ private:
     Model* model_;
     Tokenizer* tokenizer_;
     Sampler sampler_;
+    KVCache kv_cache_;
 };
 
 } // namespace oil

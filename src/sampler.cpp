@@ -105,11 +105,12 @@ int Sampler::sample_top_p(const float* logits, int vocab_size, float p, float te
     return scored[cutoff - 1].second;
 }
 
-int Sampler::sample(const float* logits, int vocab_size, const SamplerConfig& cfg) {
+int Sampler::sample(const float* logits, int vocab_size, const SamplerConfig& cfg,
+                    const std::vector<int>& prev_tokens) {
     std::vector<float> adjusted(logits, logits + vocab_size);
     
     if (cfg.repetition_penalty > 1.0f) {
-        apply_repetition_penalty(adjusted.data(), vocab_size, {}, cfg.repetition_penalty);
+        apply_repetition_penalty(adjusted.data(), vocab_size, prev_tokens, cfg.repetition_penalty);
     }
     
     if (cfg.top_p < 1.0f) {

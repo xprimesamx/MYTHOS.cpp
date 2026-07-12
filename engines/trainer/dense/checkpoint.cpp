@@ -10,17 +10,14 @@ namespace dense {
 
 namespace {
 
-struct AdamWState : AdamW {
-    auto& get_state_map() { return state_; }
-    auto& get_params() { return parameters_; }
-};
-
 void write_tensor_ser(std::ofstream& file, const std::string& name, const Tensor& t) {
     uint32_t name_len = (uint32_t)name.size();
     file.write((const char*)&name_len, sizeof(name_len));
     file.write(name.data(), (std::streamsize)name_len);
 
     size_t ser_size = t.serialized_size();
+    if (ser_size > UINT32_MAX)
+        throw Error("tensor too large for checkpoint format (>4GB)");
     uint32_t ser_size32 = (uint32_t)ser_size;
     file.write((const char*)&ser_size32, sizeof(ser_size32));
 
@@ -65,7 +62,6 @@ void DenseTrainer::save_checkpoint(const std::string& path) {
     uint32_t step_saved = (uint32_t)step_;
     file.write((const char*)&step_saved, sizeof(step_saved));
 
-    auto& opt_state = reinterpret_cast<AdamWState&>(optimizer_);
     float opt_lr = optimizer_.get_lr();
     file.write((const char*)&opt_lr, sizeof(opt_lr));
 
@@ -77,7 +73,7 @@ void DenseTrainer::save_checkpoint(const std::string& path) {
         write_tensor_ser(file, name, *params[i]);
     }
 
-    auto& state_map = opt_state.get_state_map();
+    auto& state_map = optimizer_.mutable_state();
     uint32_t num_opt = (uint32_t)state_map.size();
     file.write((const char*)&num_opt, sizeof(num_opt));
 
@@ -130,11 +126,10 @@ void DenseTrainer::load_checkpoint(const std::string& path) {
 
     step_ = (int)step_loaded;
 
-    auto& opt_state = reinterpret_cast<AdamWState&>(optimizer_);
     optimizer_.set_lr(opt_lr_loaded);
     optimizer_.scheduler_step(step_);
 
-    auto& state_map = opt_state.get_state_map();
+    auto& state_map = optimizer_.mutable_state();
 
     if (version >= 2) {
         uint32_t num_opt = 0;

@@ -40,27 +40,31 @@ Tensor ObjectDetector::forward(const Tensor& visual_features) {
     int64_t S = visual_features.dim(1);
     for (int64_t b = 0; b < B; ++b) {
         for (int64_t n = 0; n < N; ++n) {
+            std::vector<float> scores(S);
             for (int64_t s = 0; s < S; ++s) {
-                float score = 0.0f;
+                float dot = 0.0f;
                 for (int64_t d = 0; d < D; ++d)
-                    score += q_ptr[b * N * D + n * D + d] * vis[b * S * D + s * D + d];
+                    dot += q_ptr[b * N * D + n * D + d] * vis[b * S * D + s * D + d];
+                scores[s] = dot / std::sqrt((float)D);
             }
-            float softmax_sum = 0.0f;
+            float row_max = -INFINITY;
+            for (int64_t s = 0; s < S; ++s)
+                if (scores[s] > row_max) row_max = scores[s];
+            float sum = 0.0f;
             for (int64_t s = 0; s < S; ++s) {
-                float score = 0.0f;
-                for (int64_t d = 0; d < D; ++d)
-                    score += q_ptr[b * N * D + n * D + d] * vis[b * S * D + s * D + d];
-                ao[b * N * D + n * D] += score;
+                scores[s] = std::exp(scores[s] - row_max);
+                sum += scores[s];
+            }
+            float inv_sum = 1.0f / (sum + 1e-10f);
+            for (int64_t s = 0; s < S; ++s) scores[s] *= inv_sum;
+            for (int64_t d = 0; d < D; ++d) {
+                float val = 0.0f;
+                for (int64_t s = 0; s < S; ++s)
+                    val += scores[s] * vis[b * S * D + s * D + d];
+                ao[b * N * D + n * D + d] = val;
             }
         }
     }
-
-    // Temporary: fallback to average pool of visual features
-    for (int64_t b = 0; b < B; ++b)
-        for (int64_t n = 0; n < N; ++n)
-            for (int64_t d = 0; d < D; ++d)
-                for (int64_t s = 0; s < S; ++s)
-                    ao[b * N * D + n * D + d] += vis[b * S * D + s * D + d] / (float)(S * N);
 
     Tensor attn_flat = attn_out.reshape({B * N, D});
     Tensor bbox_raw_full({B * N, max_detections * 4});
@@ -226,7 +230,19 @@ SceneGraph VisionEncoder::understand_image(const Tensor& image) {
         std::memcpy(cf + b * D, f + b * N * D, D * sizeof(float));
 
     Tensor bbox_out = detector.forward(features);
-    Tensor scene_rel = scene_encoder.forward(features.reshape({N, D}), Tensor::zeros({N * N}));
+    int64_t n_patches_h = (int64_t)std::sqrt((double)(N - 1));
+    int64_t n_patches_w = (N - 1) / n_patches_h;
+    Tensor spatial_edges({N * N});
+    float* se = spatial_edges.data<float>();
+    for (int64_t i = 0; i < N; ++i)
+        for (int64_t j = 0; j < N; ++j) {
+            int64_t pi = i / n_patches_w, pj = i % n_patches_w;
+            int64_t qi = j / n_patches_w, qj = j % n_patches_w;
+            int64_t di = pi - qi, dj = pj - qj;
+            se[i * N + j] = (float)((std::abs(di) > std::abs(dj))
+                ? (di > 0 ? 0 : 1) : (dj > 0 ? 2 : 3));
+        }
+    Tensor scene_rel = scene_encoder.forward(features.reshape({N, D}), spatial_edges);
 
     SceneGraph graph;
     graph.objects = bbox_out;

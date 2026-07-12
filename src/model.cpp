@@ -41,12 +41,21 @@ int64_t DenseModel::param_count() const {
     return count;
 }
 
-Tensor DenseModel::forward(const Tensor& input_ids, const Tensor& positions) {
+Tensor DenseModel::forward(const Tensor& input_ids, const Tensor& positions,
+                           KVCache* cache) {
     int64_t B = input_ids.dim(0);
     int64_t S = input_ids.dim(1);
 
     Tensor h = tok_embeddings->forward(input_ids.reshape(Shape{B * S}));
     h = h.reshape(Shape{B, S, config.hidden_size});
+
+    KVCache local_cache;
+    KVCache* active_cache = cache;
+    if (!active_cache) {
+        local_cache.init((int)config.num_layers, config.max_seq_len,
+                         config.num_heads, config.head_dim);
+        active_cache = &local_cache;
+    }
 
     Tensor causal_mask(Shape{1, 1, S, config.max_seq_len});
     float* md = causal_mask.data<float>();
@@ -56,11 +65,8 @@ Tensor DenseModel::forward(const Tensor& input_ids, const Tensor& positions) {
         }
     }
 
-    KVCache cache(config.num_layers, config.max_seq_len, config.num_heads,
-                  config.head_dim);
-
     for (int64_t i = 0; i < config.num_layers; i++) {
-        h = layers[i]->forward(h, positions, causal_mask, cache, (int)i);
+        h = layers[i]->forward(h, positions, causal_mask, *active_cache, (int)i);
     }
 
     h = norm->forward(h);

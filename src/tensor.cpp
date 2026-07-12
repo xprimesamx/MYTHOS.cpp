@@ -4,17 +4,76 @@
 #include <cstring>
 #include <sstream>
 #include <iomanip>
+#include <cmath>
 
 namespace oil {
 
+// IEEE 754 FP16 conversion helpers
+static inline uint16_t float_to_half(float f) {
+    uint32_t u;
+    memcpy(&u, &f, sizeof(u));
+    uint32_t sign = (u >> 31) & 1;
+    uint32_t exp = (u >> 23) & 0xFF;
+    uint32_t mant = u & 0x7FFFFF;
+    if (exp == 0) return (uint16_t)(sign << 15);
+    if (exp == 0xFF) return (uint16_t)((sign << 15) | 0x7C00 | (mant ? 0x200 : 0));
+    int32_t newexp = (int32_t)exp - 127 + 15;
+    if (newexp >= 31) return (uint16_t)((sign << 15) | 0x7C00);
+    if (newexp <= 0) {
+        if (newexp < -10) return (uint16_t)(sign << 15);
+        mant = (mant | 0x800000) >> (14 - newexp);
+        return (uint16_t)((sign << 15) | (mant >> 1));
+    }
+    return (uint16_t)((sign << 15) | ((uint32_t)newexp << 10) | (mant >> 13));
+}
+
+static inline float half_to_float(uint16_t h) {
+    uint32_t sign = (h >> 15) & 1;
+    uint32_t exp = (h >> 10) & 0x1F;
+    uint32_t mant = h & 0x3FF;
+    if (exp == 0) {
+        float v = (float)mant * 0.000000059604644775390625f;
+        return sign ? -v : v;
+    }
+    if (exp == 31) {
+        if (mant == 0) return sign ? -INFINITY : INFINITY;
+        return NAN;
+    }
+    uint32_t f32 = (sign << 31) | ((exp + 112) << 23) | (mant << 13);
+    float result;
+    memcpy(&result, &f32, sizeof(result));
+    return result;
+}
+
+Tensor Tensor::to_dtype(DType dtype) const {
+    if (dtype_ == dtype) return *this;
+    Tensor result(shape_, dtype);
+    int64_t n = numel();
+    if (dtype_ == DType::F32 && dtype == DType::F16) {
+        const float* src = data<float>();
+        uint16_t* dst = result.data<uint16_t>();
+        for (int64_t i = 0; i < n; i++)
+            dst[i] = float_to_half(src[i]);
+    } else if (dtype_ == DType::F16 && dtype == DType::F32) {
+        const uint16_t* src = data<uint16_t>();
+        float* dst = result.data<float>();
+        for (int64_t i = 0; i < n; i++)
+            dst[i] = half_to_float(src[i]);
+    } else {
+        OIL_CHECK(false, "to_dtype: unsupported conversion " +
+                  std::to_string((int)dtype_) + " -> " + std::to_string((int)dtype));
+    }
+    return result;
+}
+
 Tensor::Tensor()
     : shape_(), dtype_(DType::F32), requires_grad_(false),
-      grad_(nullptr), offset_(0)
+      grad_(nullptr), offset_(0), is_transposed_(false)
 {}
 
 Tensor::Tensor(Shape shape, DType dtype)
     : shape_(shape), dtype_(dtype), requires_grad_(false),
-      grad_(nullptr), offset_(0)
+      grad_(nullptr), offset_(0), is_transposed_(false)
 {
     size_t bytes = (size_t)shape_.numel() * ::oil::dtype_size(dtype);
     buffer_ = std::make_shared<Buffer>(bytes, 64);
@@ -24,7 +83,7 @@ Tensor::Tensor(Shape shape, DType dtype)
 
 Tensor::Tensor(Shape shape, std::shared_ptr<Buffer> buffer, DType dtype)
     : shape_(shape), dtype_(dtype), buffer_(buffer),
-      requires_grad_(false), grad_(nullptr), offset_(0)
+      requires_grad_(false), grad_(nullptr), offset_(0), is_transposed_(false)
 {
     compute_strides();
 }
@@ -36,7 +95,7 @@ Tensor::~Tensor() {
 Tensor::Tensor(const Tensor& other)
     : shape_(other.shape_), dtype_(other.dtype_), buffer_(other.buffer_),
       offset_(other.offset_), strides_(other.strides_),
-      requires_grad_(other.requires_grad_)
+      requires_grad_(other.requires_grad_), is_transposed_(other.is_transposed_)
 {
     if (other.grad_) {
         grad_ = new Tensor(*other.grad_);
@@ -53,6 +112,7 @@ Tensor& Tensor::operator=(const Tensor& other) {
         offset_ = other.offset_;
         strides_ = other.strides_;
         requires_grad_ = other.requires_grad_;
+        is_transposed_ = other.is_transposed_;
         delete grad_;
         if (other.grad_) {
             grad_ = new Tensor(*other.grad_);
@@ -67,10 +127,12 @@ Tensor::Tensor(Tensor&& other) noexcept
     : shape_(other.shape_), dtype_(other.dtype_),
       buffer_(std::move(other.buffer_)),
       offset_(other.offset_), strides_(std::move(other.strides_)),
-      requires_grad_(other.requires_grad_), grad_(other.grad_)
+      requires_grad_(other.requires_grad_), grad_(other.grad_),
+      is_transposed_(other.is_transposed_)
 {
     other.grad_ = nullptr;
     other.offset_ = 0;
+    other.is_transposed_ = false;
 }
 
 Tensor& Tensor::operator=(Tensor&& other) noexcept {
@@ -81,10 +143,12 @@ Tensor& Tensor::operator=(Tensor&& other) noexcept {
         offset_ = other.offset_;
         strides_ = std::move(other.strides_);
         requires_grad_ = other.requires_grad_;
+        is_transposed_ = other.is_transposed_;
         delete grad_;
         grad_ = other.grad_;
         other.grad_ = nullptr;
         other.offset_ = 0;
+        other.is_transposed_ = false;
     }
     return *this;
 }
@@ -96,15 +160,18 @@ void Tensor::compute_strides() {
         strides_[i] = s;
         s *= shape_.dims[i];
     }
+    is_transposed_ = false;
 }
 
 Tensor Tensor::view(const Shape& new_shape) const {
+    OIL_CHECK(new_shape.numel() == numel(), "view: size mismatch");
     Tensor t;
     t.shape_ = new_shape;
     t.dtype_ = dtype_;
     t.buffer_ = buffer_;
     t.offset_ = offset_;
     t.requires_grad_ = requires_grad_;
+    t.is_transposed_ = is_transposed_;
     t.compute_strides();
     return t;
 }
@@ -130,33 +197,36 @@ Tensor Tensor::reshape(const Shape& new_shape) const {
 
 Tensor Tensor::transpose(int dim1, int dim2) const {
     OIL_CHECK(dim1 < shape_.rank && dim2 < shape_.rank, "transpose: dim out of range");
-    int64_t n = numel();
-    std::vector<int64_t> src_strides(rank());
-    src_strides[rank()-1] = 1;
-    for (int r = rank()-2; r >= 0; --r)
-        src_strides[r] = src_strides[r+1] * shape_.dims[r+1];
-
-    Shape dst_shape = shape_;
-    std::swap(dst_shape.dims[dim1], dst_shape.dims[dim2]);
-    std::vector<int> dim_map(rank());
-    for (int r = 0; r < rank(); ++r) dim_map[r] = r;
-    std::swap(dim_map[dim1], dim_map[dim2]);
-
-    Tensor t(dst_shape, dtype_);
+    if (dim1 == dim2) return *this;
+    Tensor t;
+    t.shape_ = shape_;
+    t.dtype_ = dtype_;
+    t.buffer_ = buffer_;
+    t.offset_ = offset_;
     t.requires_grad_ = requires_grad_;
-    const char* src = static_cast<const char*>(data());
-    char* dst = static_cast<char*>(t.data());
-    int64_t elem_bytes = dtype_size(dtype_);
-    for (int64_t i = 0; i < n; i++) {
-        int64_t src_off = 0, rem = i;
-        for (int r = rank()-1; r >= 0; --r) {
-            int64_t idx = rem % dst_shape.dims[r];
-            rem /= dst_shape.dims[r];
-            src_off += idx * src_strides[dim_map[r]];
-        }
-        memcpy(dst + i * elem_bytes, src + src_off * elem_bytes, elem_bytes);
+    t.strides_ = strides_;
+    t.is_transposed_ = false;
+    std::swap(t.shape_.dims[dim1], t.shape_.dims[dim2]);
+    std::swap(t.strides_[dim1], t.strides_[dim2]);
+    if (dim1 == rank()-1 && dim2 == rank()-2 && shape_.dims[dim1] == shape_.dims[dim2]) {
+        return t;
     }
-    return t;
+    // Clone to contiguous: all math ops assume flat data()[i] indexing
+    Tensor copy(t.shape_, t.dtype_);
+    copy.requires_grad_ = t.requires_grad_;
+    int64_t n = t.numel();
+    int64_t elem_bytes = dtype_size(t.dtype_);
+    for (int64_t i = 0; i < n; i++) {
+        int64_t off = 0, rem = i;
+        for (int r = t.rank()-1; r >= 0; --r) {
+            int64_t idx = rem % t.shape_.dims[r];
+            rem /= t.shape_.dims[r];
+            off += idx * t.strides_[r];
+        }
+        memcpy((char*)copy.data() + i * elem_bytes,
+               (const char*)t.data() + off * elem_bytes, elem_bytes);
+    }
+    return copy;
 }
 
 void Tensor::fill(float val) {
@@ -262,7 +332,16 @@ Tensor Tensor::deserialize(const uint8_t* src, size_t& offset) {
     return t;
 }
 
-bool Tensor::is_contiguous() const { return true; }
+bool Tensor::is_contiguous() const {
+    if (is_transposed_) return false;
+    if (offset_ != 0) return false;
+    int64_t expected = 1;
+    for (int i = rank() - 1; i >= 0; i--) {
+        if (strides_[i] != expected) return false;
+        expected *= shape_.dims[i];
+    }
+    return true;
+}
 
 std::string Tensor::to_string() const {
     std::ostringstream os;

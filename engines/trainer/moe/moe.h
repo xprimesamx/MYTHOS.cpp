@@ -89,6 +89,7 @@ public:
     std::vector<FFN> experts;
     // Expert-to-modality mapping
     std::vector<ModalityType> expert_modalities;
+    float last_z_loss = 0.0f;
 private:
     MoEConfig config_;
 };

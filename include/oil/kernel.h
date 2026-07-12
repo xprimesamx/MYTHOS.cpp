@@ -44,9 +44,25 @@ void oil4_gemm(const uint8_t* packed_indices, const uint16_t* codebook,
 void scalar_gemm(const float* A, const float* B, float* C,
                  int M, int N, int K);
 
+// Tiled GEMM with 64x64 blocking for cache efficiency
+void tiled_gemm(const float* A, const float* B, float* C,
+                int M, int N, int K);
+
 // AVX2 matmul
 void avx2_gemm(const float* A, const float* B, float* C,
                int M, int N, int K);
+
+// AVX2 tiled GEMM
+void avx2_tiled_gemm(const float* A, const float* B, float* C,
+                     int M, int N, int K);
+
+// AVX2 I2S GEMM with LUT-based decode (32 values/iteration)
+void i2s_gemm_avx2(const Tensor& weights, const Tensor& activations,
+                   Tensor& output, int M, int N, int K);
+
+// AVX2 I2S GEMM with VNNI: packed ternary × int8 activations
+void i2s_gemm_vnni(const uint8_t* packed_w, const int8_t* activations,
+                   float* output, int M, int N, int K);
 
 } // namespace kernel
 } // namespace oil

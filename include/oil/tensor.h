@@ -41,6 +41,8 @@ public:
     Tensor reshape(const Shape& new_shape) const;
     Tensor transpose(int dim1, int dim2) const;
 
+    Tensor to_dtype(DType dtype) const;
+
     void fill(float val);
     void copy_from(const Tensor& src);
     void copy_to(Tensor& dst) const;
@@ -74,11 +76,15 @@ private:
     bool requires_grad_ = false;
     Tensor* grad_ = nullptr;
     size_t offset_ = 0;
+    bool is_transposed_ = false;
     std::vector<int64_t> strides_;
 
     void compute_strides();
     int64_t offset_to_flat(const std::initializer_list<int64_t>& indices) const;
     bool is_contiguous() const;
+    const std::vector<int64_t>& strides() const { return strides_; }
+    bool is_transposed() const { return is_transposed_; }
+    size_t offset() const { return offset_; }
 };
 
 } // namespace oil

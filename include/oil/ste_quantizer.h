@@ -14,6 +14,11 @@ public:
     // Forward: quantize weights to target format
     // Backward: identity gradient (straight-through)
     Tensor forward(const Tensor& fp32_weight);
+
+    // Mixed-format forward: different formats per block
+    // per_block_formats[i] specifies the format for the i-th block of size block_size
+    // The last block may be smaller than block_size
+    Tensor forward_mixed(const Tensor& weights, const std::vector<Format>& per_block_formats, int block_size = 256);
     
     // Quantize with codebook training
     Tensor quantize_with_codebook(const Tensor& fp32_weight, CodebookOIL8& codebook);

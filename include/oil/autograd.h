@@ -21,6 +21,8 @@ struct AutogradNode {
     std::vector<Tensor> inputs;
     std::vector<Tensor> outputs;
     bool is_leaf = false;
+    bool checkpoint = false;
+    std::shared_ptr<AutogradNode> checkpoint_next;
 };
 
 class AutogradEngine {
@@ -32,6 +34,10 @@ public:
 
     static bool enabled() { return enabled_; }
     static void set_enabled(bool e) { enabled_ = e; }
+
+    // Gradient checkpointing: mark next op as checkpoint boundary
+    static void set_checkpoint();
+    static bool is_checkpoint();
 
     // Register a parameter tensor so gradient is set on the original, not autograd copies
     void register_parameter(Tensor* p);
@@ -58,6 +64,8 @@ private:
     std::unordered_map<void*, std::weak_ptr<AutogradNode>> output_to_node_;
     std::unordered_map<void*, Tensor*> param_map_;
     static bool enabled_;
+    bool next_is_checkpoint_ = false;
+    std::shared_ptr<AutogradNode> last_checkpoint_;
 };
 
 Tensor matmul_grad(const Tensor& a, const Tensor& b, const Tensor& grad_output);

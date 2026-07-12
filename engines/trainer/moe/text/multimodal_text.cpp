@@ -15,7 +15,8 @@ TextEncoder::TextEncoder(int64_t vocab_size, int64_t hidden, int64_t max_len_)
     float* pe = pos_embed.data<float>();
     for (int64_t p = 0; p < max_len_; ++p) {
         for (int64_t i = 0; i < hidden; ++i) {
-            float angle = (float)p / std::pow(10000.0f, (float)(i / 2) / (float)hidden);
+            float exponent = (2.0f * (float)(i / 2)) / (float)hidden;
+            float angle = (float)p / std::pow(10000.0f, exponent);
             if (i % 2 == 0)
                 pe[p * hidden + i] = std::sin(angle);
             else

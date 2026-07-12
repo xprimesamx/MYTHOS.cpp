@@ -78,16 +78,7 @@ void FineTuner::fine_tune(DataLoader& dataloader) {
             }
 
             optimizer_.zero_grad();
-            DenseModel* dm = dynamic_cast<DenseModel*>(model_);
-            if (dm) {
-                std::vector<Tensor*> params;
-                collect_params(dm, params);
-                for (auto* param : params) {
-                    if (param->numel() > 0) {
-                        param->set_grad(grad);
-                    }
-                }
-            }
+            AutogradEngine::instance().backward(loss);
             optimizer_.step();
 
             if (batch_idx % cfg_.log_interval == 0) {

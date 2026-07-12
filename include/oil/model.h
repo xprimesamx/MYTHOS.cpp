@@ -14,7 +14,8 @@ class Model {
 public:
     virtual ~Model() = default;
     
-    virtual Tensor forward(const Tensor& input_ids, const Tensor& positions) = 0;
+    virtual Tensor forward(const Tensor& input_ids, const Tensor& positions,
+                           KVCache* cache = nullptr) = 0;
     virtual void load(const std::string& oil_path);
     virtual void save(const std::string& oil_path) const;
     virtual int64_t param_count() const = 0;
@@ -28,7 +29,8 @@ public:
     DenseModel() = default;
     explicit DenseModel(const TransformerConfig& cfg);
     
-    Tensor forward(const Tensor& input_ids, const Tensor& positions) override;
+    Tensor forward(const Tensor& input_ids, const Tensor& positions,
+                   KVCache* cache = nullptr) override;
     void load(const std::string& oil_path) override;
     void save(const std::string& oil_path) const override;
     int64_t param_count() const override;
