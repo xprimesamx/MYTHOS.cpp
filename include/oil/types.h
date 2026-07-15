@@ -31,8 +31,8 @@ inline const char* format_name(Format f) {
         case Format::OIL8:    return "oil8";
         case Format::FP16:    return "fp16";
         case Format::FP32:    return "fp32";
+        default: return "unknown";
     }
-    return "unknown";
 }
 
 inline float format_bpw(Format f) {
@@ -43,8 +43,8 @@ inline float format_bpw(Format f) {
         case Format::OIL8:    return 8.0f;
         case Format::FP16:    return 16.0f;
         case Format::FP32:    return 32.0f;
+        default: return 0;
     }
-    return 0;
 }
 
 enum class DType : uint8_t {
@@ -66,8 +66,8 @@ inline size_t dtype_size(DType dt) {
         case DType::I1: return 1; // 8 per byte
         case DType::F16: return 2;
         case DType::F32: return 4;
+        default: return 0;
     }
-    return 0;
 }
 
 inline DType format_to_dtype(Format f) {
@@ -78,8 +78,8 @@ inline DType format_to_dtype(Format f) {
         case Format::OIL8:    return DType::U8;
         case Format::FP16:    return DType::F16;
         case Format::FP32:    return DType::F32;
+        default: return DType::F32;
     }
-    return DType::F32;
 }
 
 struct Shape {
@@ -91,6 +91,7 @@ struct Shape {
     Shape(int64_t d0, int64_t d1) : rank(2) { dims[0]=d0; dims[1]=d1; }
     Shape(int64_t d0, int64_t d1, int64_t d2) : rank(3) { dims[0]=d0; dims[1]=d1; dims[2]=d2; }
     Shape(std::initializer_list<int64_t> l) : rank((int)l.size()) {
+        if (rank > 8) throw std::runtime_error("Shape: rank exceeds maximum of 8");
         int i=0; for (auto x: l) dims[i++] = x;
     }
 

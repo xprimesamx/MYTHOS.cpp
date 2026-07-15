@@ -88,7 +88,35 @@ int main(int argc, char** argv) {
     oil::OILReader reader(model_path);
     auto config_data = reader.read_config();
     oil::TransformerConfig cfg;
-    std::memcpy(&cfg, config_data.data(), std::min(config_data.size(), sizeof(cfg)));
+    std::memset(&cfg, 0, sizeof(cfg));
+    const uint8_t* ptr = config_data.data();
+    size_t remaining = config_data.size();
+    auto read_field = [&](auto& field) {
+        if (remaining >= sizeof(field)) {
+            std::memcpy(&field, ptr, sizeof(field));
+            ptr += sizeof(field);
+            remaining -= sizeof(field);
+        }
+    };
+    read_field(cfg.vocab_size);
+    read_field(cfg.hidden_size);
+    read_field(cfg.num_layers);
+    read_field(cfg.num_heads);
+    read_field(cfg.head_dim);
+    read_field(cfg.ffn_hidden_size);
+    read_field(cfg.norm_eps);
+    read_field(cfg.rope_theta);
+    read_field(cfg.max_seq_len);
+    if (remaining >= sizeof(int8_t)) {
+        int8_t act;
+        std::memcpy(&act, ptr, sizeof(act));
+        cfg.activation = static_cast<oil::Activation>(act);
+        ptr += sizeof(int8_t);
+        remaining -= sizeof(int8_t);
+    }
+    if (remaining >= sizeof(int64_t)) {
+        read_field(cfg.num_kv_heads);
+    }
 
     oil::DenseModel model(cfg);
     model.load(model_path);

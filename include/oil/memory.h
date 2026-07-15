@@ -4,7 +4,9 @@
 #include <cstddef>
 #include <atomic>
 #include <cstdlib>
+#include <cstring>
 #include <new>
+#include <algorithm>
 
 namespace oil {
 
@@ -65,14 +67,13 @@ public:
     bool empty() const { return block_.size == 0; }
 
     void resize(size_t new_size) {
-        if (block_.ptr) {
-            if (block_.refcount->load(std::memory_order_acquire) > 1)
-                *this = Buffer(new_size, 64);
-            else
-                *this = Buffer(new_size, 64);
-        } else {
-            *this = Buffer(new_size, 64);
+        if (new_size == block_.size) return;
+        Buffer new_buf(new_size, 64);
+        if (block_.ptr && new_size > 0) {
+            size_t copy_size = (std::min)(block_.size, new_size);
+            std::memcpy(new_buf.data(), block_.ptr, copy_size);
         }
+        *this = std::move(new_buf);
     }
 
     Buffer slice(size_t offset, size_t count) const {
@@ -80,6 +81,7 @@ public:
             return Buffer();
         Buffer sub;
         sub.block_.ptr = static_cast<char*>(block_.ptr) + offset;
+        sub.block_.base_ptr = block_.base_ptr ? block_.base_ptr : block_.ptr;
         sub.block_.refcount = block_.refcount;
         sub.block_.size = count;
         if (sub.block_.refcount)
@@ -90,26 +92,27 @@ public:
 private:
     struct Block {
         void* ptr;
+        void* base_ptr;
         std::atomic<int>* refcount;
         size_t size;
     };
 
-    Block block_{nullptr, nullptr, 0};
+    Block block_{nullptr, nullptr, nullptr, 0};
 
     static Block allocate_block(size_t bytes, size_t alignment) {
-        if (bytes == 0) return {nullptr, nullptr, 0};
+        if (bytes == 0) return {nullptr, nullptr, nullptr, 0};
         void* ptr = AlignedAllocator::allocate(bytes, alignment);
         auto* rc = new std::atomic<int>(1);
-        return {ptr, rc, bytes};
+        return {ptr, ptr, rc, bytes};
     }
 
     void release() {
         if (block_.refcount &&
             block_.refcount->fetch_sub(1, std::memory_order_acq_rel) == 1) {
-            AlignedAllocator::deallocate(block_.ptr);
+            AlignedAllocator::deallocate(block_.base_ptr ? block_.base_ptr : block_.ptr);
             delete block_.refcount;
         }
-        block_ = {nullptr, nullptr, 0};
+        block_ = {nullptr, nullptr, nullptr, 0};
     }
 };
 

@@ -23,7 +23,7 @@ void Optimizer::zero_grad() {
 }
 
 AdamW::AdamW(float lr, float beta1, float beta2, float eps, float weight_decay)
-    : lr_(lr), beta1_(beta1), beta2_(beta2), eps_(eps), weight_decay_(weight_decay), t_(0) {}
+    : lr_(lr), current_lr_(lr), beta1_(beta1), beta2_(beta2), eps_(eps), weight_decay_(weight_decay), t_(0) {}
 
 void AdamW::set_lr(float lr) { lr_ = lr; }
 float AdamW::get_lr() const { return current_lr_ > 0 ? current_lr_ : lr_; }
@@ -37,16 +37,16 @@ void AdamW::set_schedule(Schedule s, int warmup_steps, int total_steps) {
 void AdamW::scheduler_step(int step) {
     float ratio = total_steps_ > 0 ? (float)step / total_steps_ : 1.0f;
     switch (schedule_) {
-        case CONSTANT:
+        case Schedule::CONSTANT:
             current_lr_ = lr_;
             break;
-        case COSINE:
+        case Schedule::COSINE:
             current_lr_ = lr_ * 0.5f * (1.0f + std::cos(3.14159265f * ratio));
             break;
-        case LINEAR:
+        case Schedule::LINEAR:
             current_lr_ = lr_ * (1.0f - ratio);
             break;
-        case WARMUP_COSINE:
+        case Schedule::WARMUP_COSINE:
             if (step < warmup_steps_) {
                 current_lr_ = lr_ * (float)step / warmup_steps_;
             } else {

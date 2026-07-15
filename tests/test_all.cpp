@@ -169,7 +169,7 @@ void test_expert_choice_moe() {
     printf("\n=== EXPERT CHOICE MoE ===\n");
     MoEAllConfig cfg;
     cfg.num_experts = 4;
-    cfg.capacity_factor = 1;
+    cfg.capacity_factor = 1.0f;
     cfg.expert_hidden_size = 32;
     ExpertChoiceMoE moe(16, cfg);
     Tensor x({1, 4, 16});

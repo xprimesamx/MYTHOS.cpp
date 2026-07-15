@@ -13,9 +13,11 @@ namespace kernel {
 void tl1_precompute_lut(const int8_t* activations, int8_t* lut,
                         int K, float scales) {
     (void)scales;
-    for (int k = 0; k < K; k += 2) {
-        int8_t a0 = activations[k];
-        int8_t a1 = activations[k + 1];
+    int groups = K / 2;
+    int remaining = K % 2;
+    for (int k = 0; k < groups; k++) {
+        int8_t a0 = activations[k * 2];
+        int8_t a1 = activations[k * 2 + 1];
         int idx = 0;
         for (int w0 = -1; w0 <= 1; w0++) {
             for (int w1 = -1; w1 <= 1; w1++) {
@@ -33,7 +35,7 @@ void tl1_gemm(const Tensor& weights, const Tensor& activations,
     const uint8_t* w = (const uint8_t*)weights.data();
     const float* a = (const float*)activations.data();
 
-    Tensor a_int8(Shape{K}, DType::U8);
+    Tensor a_int8(Shape{N * K}, DType::U8);
     int8_t* a_i8 = (int8_t*)a_int8.data();
 
     std::vector<float> scales(N);
@@ -60,7 +62,7 @@ void tl1_gemm(const Tensor& weights, const Tensor& activations,
 
             tl1_precompute_lut(a_row, lut.data(), K, 1.0f);
 
-            for (int i = 0; i < K; i += 2) {
+            for (int i = 0; i < K - 1; i += 2) {
                 uint8_t packed = w_row[i / 4];
                 int wi = (packed >> ((i % 4) * 2)) & 3;
                 total += lut[(i / 2) * 9 + wi];
@@ -109,7 +111,7 @@ void tl2_gemm(const Tensor& weights, const Tensor& activations,
     const uint8_t* w = (const uint8_t*)weights.data();
     const float* a = (const float*)activations.data();
 
-    Tensor a_int8(Shape{K}, DType::U8);
+    Tensor a_int8(Shape{N * K}, DType::U8);
     int8_t* a_i8 = (int8_t*)a_int8.data();
 
     // Quantize activations per row

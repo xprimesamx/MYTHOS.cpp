@@ -32,8 +32,6 @@ void DistributedContext::barrier() {
 
 void DistributedContext::all_reduce(float* data, int64_t n) {
     if (world_size_ <= 1) return;
-    // Simulate all-reduce sum via shared buffer + barriers (ring-reduce style)
-    // Phase 1: accumulate into shared buffer
     {
         std::lock_guard<std::mutex> lock(global_reduce_mutex);
         if (global_reduce_buffer.size() < (size_t)n)
@@ -42,18 +40,10 @@ void DistributedContext::all_reduce(float* data, int64_t n) {
             global_reduce_buffer[i] += data[i];
     }
     barrier();
-    // Phase 2: copy back (must be last rank to finalize)
-    {
-        std::lock_guard<std::mutex> lock(global_reduce_mutex);
-        if (world_rank_ == world_size_ - 1) {
-            for (int64_t i = 0; i < n; i++)
-                global_reduce_buffer[i] /= (float)world_size_;
-        }
-    }
-    barrier();
     {
         std::lock_guard<std::mutex> lock(global_reduce_mutex);
         std::memcpy(data, global_reduce_buffer.data(), n * sizeof(float));
+        std::fill(global_reduce_buffer.begin(), global_reduce_buffer.begin() + n, 0.0f);
     }
     barrier();
 }

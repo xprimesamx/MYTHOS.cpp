@@ -577,8 +577,7 @@ void Trainer::save_checkpoint(const std::string& path) {
     model_->save(path);
     if (!optimizer_) return;
     std::string opt_path = path + ".opt";
-    FILE* fp;
-    fopen_s(&fp, opt_path.c_str(), "wb");
+    FILE* fp = std::fopen(opt_path.c_str(), "wb");
     if (!fp) return;
     int32_t step_i = (int32_t)step_;
     float lr = optimizer_->get_lr();
@@ -612,8 +611,7 @@ void Trainer::load_checkpoint(const std::string& path) {
     model_->load(path);
     if (!optimizer_) return;
     std::string opt_path = path + ".opt";
-    FILE* fp;
-    fopen_s(&fp, opt_path.c_str(), "rb");
+    FILE* fp = std::fopen(opt_path.c_str(), "rb");
     if (!fp) return;
     int32_t step_i = 0;
     float lr = 0;

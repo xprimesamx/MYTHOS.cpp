@@ -1,0 +1,34 @@
+# `oil-finetune` — Fine-Tuning CLI
+
+**Path:** `tools/finetune.cpp`
+
+Fine-tuning tool for adapting pre-trained OIL models to new data.
+
+## Usage
+
+```
+oil-finetune --model <base.oil> --data <data.txt> --output <output.oil> [options]
+```
+
+### Arguments
+
+| Argument | Default | Description |
+|----------|---------|-------------|
+| `--model` | required | Base OIL model path |
+| `--data` | required | Fine-tuning data |
+| `--output` | required | Output OIL model |
+| `--lr` | 1e-5 | Learning rate (lower for finetuning) |
+| `--epochs` | 3 | Number of epochs |
+| `--batch-size` | 4 | Batch size |
+| `--lora-r` | 0 | LoRA rank (0 = full finetune) |
+| `--freeze-layers` | - | Comma-separated layers to freeze |
+
+### Example
+
+```bash
+# Full fine-tune
+oil-finetune --model base.oil --data data.txt --output finetuned.oil --lr 1e-5
+
+# LoRA fine-tune
+oil-finetune --model base.oil --data data.txt --output lora.oil --lora-r 8
+```

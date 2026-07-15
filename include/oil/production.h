@@ -49,6 +49,7 @@ public:
 private:
     int port_;
     bool running_ = false;
+    std::vector<int> clients_;
 };
 
 // I7: Docker — Dockerfile inline

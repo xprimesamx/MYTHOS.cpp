@@ -13,18 +13,22 @@ namespace multimodal {
 ObjectDetector::ObjectDetector(int64_t hidden, int64_t classes, int64_t max_det)
     : hidden_size(hidden), num_classes(classes), max_detections(max_det)
 {
-    bbox_head = Tensor({hidden, max_detections * 4});
+    bbox_head = Tensor({hidden, 4});
     bbox_head.zero_();
-    class_head = Tensor({hidden, max_detections * classes});
+    class_head = Tensor({hidden, classes});
     class_head.zero_();
     object_query = Tensor({max_detections, hidden});
     object_query.zero_();
+    q_proj = Tensor({hidden, hidden}); q_proj.zero_();
+    k_proj = Tensor({hidden, hidden}); k_proj.zero_();
+    v_proj = Tensor({hidden, hidden}); v_proj.zero_();
 }
 
 Tensor ObjectDetector::forward(const Tensor& visual_features) {
     int64_t B = visual_features.dim(0);
     int64_t D = hidden_size;
     int64_t N = max_detections;
+    int64_t S = visual_features.dim(1);
     Tensor queries = object_query.reshape({1, N, D});
     Tensor queries_batch({B, N, D});
     float* qb = queries_batch.data<float>();
@@ -32,19 +36,26 @@ Tensor ObjectDetector::forward(const Tensor& visual_features) {
     for (int64_t b = 0; b < B; ++b)
         std::memcpy(qb + b * N * D, q, N * D * sizeof(float));
 
-    // Cross-attention: visual_features (B, S, D) as keys/values, queries as queries
+    // Cross-attention with learned Q/K/V projections
+    Tensor vis_flat = visual_features.reshape({B * S, D});
+    Tensor q_flat = queries_batch.reshape({B * N, D});
+    Tensor q_proj_flat({B * N, D});
+    Tensor k_proj_flat({B * S, D});
+    Tensor v_proj_flat({B * S, D});
+    math::gemm(1.0f, q_flat, q_proj, 0.0f, q_proj_flat);
+    math::gemm(1.0f, vis_flat, k_proj, 0.0f, k_proj_flat);
+    math::gemm(1.0f, vis_flat, v_proj, 0.0f, v_proj_flat);
     Tensor attn_out({B, N, D});
-    const float* vis = visual_features.data<float>();
-    const float* q_ptr = queries_batch.data<float>();
+    const float* vis = v_proj_flat.data<float>();
+    const float* q_ptr = q_proj_flat.data<float>();
     float* ao = attn_out.data<float>();
-    int64_t S = visual_features.dim(1);
     for (int64_t b = 0; b < B; ++b) {
         for (int64_t n = 0; n < N; ++n) {
             std::vector<float> scores(S);
             for (int64_t s = 0; s < S; ++s) {
                 float dot = 0.0f;
                 for (int64_t d = 0; d < D; ++d)
-                    dot += q_ptr[b * N * D + n * D + d] * vis[b * S * D + s * D + d];
+                    dot += q_ptr[b * N * D + n * D + d] * k_proj_flat.data<float>()[b * S * D + s * D + d];
                 scores[s] = dot / std::sqrt((float)D);
             }
             float row_max = -INFINITY;
@@ -67,11 +78,11 @@ Tensor ObjectDetector::forward(const Tensor& visual_features) {
     }
 
     Tensor attn_flat = attn_out.reshape({B * N, D});
-    Tensor bbox_raw_full({B * N, max_detections * 4});
-    Tensor class_raw_full({B * N, max_detections * num_classes});
-    math::gemm(1.0f, attn_flat, bbox_head, 0.0f, bbox_raw_full);
-    math::gemm(1.0f, attn_flat, class_head, 0.0f, class_raw_full);
-    Tensor bbox_out = bbox_raw_full.reshape({B, N, 4});
+    Tensor bbox_raw({B * N, 4});
+    Tensor class_raw({B * N, num_classes});
+    math::gemm(1.0f, attn_flat, bbox_head, 0.0f, bbox_raw);
+    math::gemm(1.0f, attn_flat, class_head, 0.0f, class_raw);
+    Tensor bbox_out = bbox_raw.reshape({B, N, 4});
 
     return bbox_out;
 }
@@ -230,14 +241,19 @@ SceneGraph VisionEncoder::understand_image(const Tensor& image) {
         std::memcpy(cf + b * D, f + b * N * D, D * sizeof(float));
 
     Tensor bbox_out = detector.forward(features);
-    int64_t n_patches_h = (int64_t)std::sqrt((double)(N - 1));
-    int64_t n_patches_w = (N - 1) / n_patches_h;
+    int64_t n_spatial = N - 1;
+    int64_t n_patches_h = (int64_t)std::sqrt((double)n_spatial);
+    if (n_patches_h < 1) n_patches_h = 1;
+    int64_t n_patches_w = n_spatial / n_patches_h;
+    if (n_patches_w < 1) n_patches_w = 1;
     Tensor spatial_edges({N * N});
     float* se = spatial_edges.data<float>();
     for (int64_t i = 0; i < N; ++i)
         for (int64_t j = 0; j < N; ++j) {
-            int64_t pi = i / n_patches_w, pj = i % n_patches_w;
-            int64_t qi = j / n_patches_w, qj = j % n_patches_w;
+            if (i == 0 || j == 0) { se[i * N + j] = 0.0f; continue; }
+            int64_t si = i - 1, sj = j - 1;
+            int64_t pi = si / n_patches_w, pj = si % n_patches_w;
+            int64_t qi = sj / n_patches_w, qj = sj % n_patches_w;
             int64_t di = pi - qi, dj = pj - qj;
             se[i * N + j] = (float)((std::abs(di) > std::abs(dj))
                 ? (di > 0 ? 0 : 1) : (dj > 0 ? 2 : 3));
@@ -246,15 +262,14 @@ SceneGraph VisionEncoder::understand_image(const Tensor& image) {
 
     SceneGraph graph;
     graph.objects = bbox_out;
-    Tensor global_feat({D});
-    Tensor cls_feat_1d = cls_features.reshape({B * 1 * D});
-    math::gemm(1.0f, cls_feat_1d, global_pool, 0.0f, global_feat);
-    graph.global_features = global_feat;
+    Tensor global_feat({B, D});
+    Tensor cls_feat_2d = cls_features.reshape({B, D});
+    math::gemm(1.0f, cls_feat_2d, global_pool, 0.0f, global_feat);
+    graph.global_features = global_feat.reshape({D});
 
-    Tensor cls_2d = cls_features.reshape({B * 1, D});
-    Tensor caption_out({B * 1, D});
-    math::gemm(1.0f, cls_2d, caption_proj, 0.0f, caption_out);
-    graph.caption_embeds = caption_out.reshape({B, D});
+    Tensor caption_out({B, D});
+    math::gemm(1.0f, cls_feat_2d, caption_proj, 0.0f, caption_out);
+    graph.caption_embeds = caption_out;
     graph.completed_tasks = {VisualTask::CLASSIFY, VisualTask::DETECT,
                              VisualTask::SCENE_GRAPH, VisualTask::CAPTION};
     return graph;
@@ -343,10 +358,10 @@ SceneGraph VisionEncoder::understand_video(const Tensor& video_frames) {
 
     SceneGraph graph;
     graph.objects = detector.forward(h);
-    Tensor global_feat2({D});
-    Tensor cls_1d = cls_features.reshape({D});
-    math::gemm(1.0f, cls_1d, global_pool, 0.0f, global_feat2);
-    graph.global_features = global_feat2;
+    Tensor global_feat2({1, D});
+    Tensor cls_2d = cls_features.reshape({1, D});
+    math::gemm(1.0f, cls_2d, global_pool, 0.0f, global_feat2);
+    graph.global_features = global_feat2.reshape({D});
     graph.completed_tasks = {VisualTask::CLASSIFY, VisualTask::DETECT,
                              VisualTask::SCENE_GRAPH, VisualTask::CAPTION};
     return graph;

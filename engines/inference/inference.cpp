@@ -106,6 +106,8 @@ Status InferenceEngine::load(const std::string& oil_path) {
         cfg.use_kv_cache = true;
         cfg.sampler.max_tokens = 2048;
         init(model_, tokenizer_, cfg);
+        owns_model_ = true;
+        owns_tokenizer_ = true;
 
         return Status::success();
     } catch (const std::exception& e) {

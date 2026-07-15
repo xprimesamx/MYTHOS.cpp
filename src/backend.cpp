@@ -78,11 +78,14 @@ public:
         Tensor C_orig;
         if (beta != 0.0f) C_orig.copy_from(C);
         kernel::avx2_gemm(A.data<float>(), B.data<float>(), C.data<float>(), M, N, K);
+        float* cd = C.data<float>();
         if (beta != 0.0f) {
-            float* cd = C.data<float>();
             const float* cod = C_orig.data<float>();
             for (int64_t i = 0; i < C.numel(); ++i)
                 cd[i] = alpha * cd[i] + beta * cod[i];
+        } else if (alpha != 1.0f) {
+            for (int64_t i = 0; i < C.numel(); ++i)
+                cd[i] = alpha * cd[i];
         }
     }
 
@@ -196,15 +199,17 @@ public:
         int M = (int)(A.numel() / A.dim(A.rank() - 1));
         int K = (int)A.dim(A.rank() - 1);
         int N = (int)B.dim(B.rank() - 1);
+        Tensor C_orig;
+        if (beta != 0.0f) C_orig.copy_from(C);
 #if defined(OIL_AVX2)
         kernel::avx2_gemm(A.data<float>(), B.data<float>(), C.data<float>(), M, N, K);
 #else
         math::gemm(alpha, A, B, beta, C);
 #endif
-        if (beta != 0.0f) {
-            float* cd = C.data<float>();
-            for (int64_t i = 0; i < C.numel(); ++i) cd[i] = alpha * cd[i] + (beta != 1.0f ? beta * cd[i] : 0);
-        }
+        float* cd = C.data<float>();
+        const float* cod = C_orig.numel() > 0 ? C_orig.data<float>() : nullptr;
+        for (int64_t i = 0; i < C.numel(); ++i)
+            cd[i] = alpha * cd[i] + (cod ? beta * cod[i] : 0.0f);
     }
 
     void gemv(float alpha, const Tensor& A, const Tensor& x, float beta, Tensor& y) override {
@@ -258,15 +263,17 @@ public:
             int M = (int)(A.numel() / A.dim(A.rank() - 1));
             int K = (int)A.dim(A.rank() - 1);
             int N = (int)B.dim(B.rank() - 1);
+            Tensor C_orig;
+            if (beta != 0.0f) C_orig.copy_from(C);
     #if defined(OIL_AVX2)
             kernel::avx2_gemm(A.data<float>(), B.data<float>(), C.data<float>(), M, N, K);
     #else
             math::gemm(alpha, A, B, beta, C);
     #endif
-            if (beta != 0.0f) {
-                float* cd = C.data<float>();
-                for (int64_t i = 0; i < C.numel(); ++i) cd[i] = alpha * cd[i] + beta * cd[i];
-            }
+            float* cd = C.data<float>();
+            const float* cod = C_orig.numel() > 0 ? C_orig.data<float>() : nullptr;
+            for (int64_t i = 0; i < C.numel(); ++i)
+                cd[i] = alpha * cd[i] + (cod ? beta * cod[i] : 0.0f);
             return;
         }
         void* dA = dx_->allocate(A.numel() * sizeof(float));

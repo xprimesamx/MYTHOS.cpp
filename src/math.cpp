@@ -38,7 +38,7 @@ float norm(const Tensor& x) {
     int64_t n = x.numel();
     double s = 0.0;
     for (int64_t i = 0; i < n; i++) s += (double)p[i] * p[i];
-    return std::sqrt((float)s);
+    return (float)std::sqrt(s);
 }
 
 float asum(const Tensor& x) {

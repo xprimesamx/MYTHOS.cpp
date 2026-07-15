@@ -420,7 +420,7 @@ MoEOutput ExpertChoiceMoE::forward(const Tensor& x) {
     int64_t B = x.dim(0), S = x.dim(1), D = hidden_size;
     int64_t T = B * S;
     int64_t E = config.num_experts;
-    int64_t capacity = std::min(T, config.capacity_factor * T / E);
+    int64_t capacity = std::min(T, (int64_t)(config.capacity_factor * T / E));
     if (capacity < 1) capacity = 1;
 
     Tensor x_flat = x.reshape({T, D});

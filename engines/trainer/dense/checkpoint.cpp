@@ -11,6 +11,8 @@ namespace dense {
 namespace {
 
 void write_tensor_ser(std::ofstream& file, const std::string& name, const Tensor& t) {
+    if (name.size() > UINT32_MAX)
+        throw Error("checkpoint: name too long");
     uint32_t name_len = (uint32_t)name.size();
     file.write((const char*)&name_len, sizeof(name_len));
     file.write(name.data(), (std::streamsize)name_len);
@@ -59,12 +61,16 @@ void DenseTrainer::save_checkpoint(const std::string& path) {
     file.write((const char*)&magic, sizeof(magic));
     file.write((const char*)&version, sizeof(version));
 
+    if (step_ > UINT32_MAX)
+        throw Error("checkpoint: step exceeds uint32_t range");
     uint32_t step_saved = (uint32_t)step_;
     file.write((const char*)&step_saved, sizeof(step_saved));
 
     float opt_lr = optimizer_.get_lr();
     file.write((const char*)&opt_lr, sizeof(opt_lr));
 
+    if (params.size() > UINT32_MAX)
+        throw Error("checkpoint: too many parameters");
     uint32_t num_params = (uint32_t)params.size();
     file.write((const char*)&num_params, sizeof(num_params));
 
@@ -73,10 +79,10 @@ void DenseTrainer::save_checkpoint(const std::string& path) {
         write_tensor_ser(file, name, *params[i]);
     }
 
-    auto& state_map = optimizer_.mutable_state();
-    uint32_t num_opt = (uint32_t)state_map.size();
+    uint32_t num_opt = (uint32_t)params.size();
     file.write((const char*)&num_opt, sizeof(num_opt));
 
+    auto& state_map = optimizer_.mutable_state();
     uint32_t idx = 0;
     for (auto* p : params) {
         auto it = state_map.find(p);

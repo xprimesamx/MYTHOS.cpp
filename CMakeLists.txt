@@ -239,6 +239,7 @@ if(OIL_BUILD_TESTS)
   add_oil_test(test_trainer  tests/test_trainer.cpp  oil_trainer oil_inference oil_tokenizer)
   add_oil_test(test_debug    tests/test_debug.cpp    oil_model)
   add_oil_test(test_all      tests/test_all.cpp      oil_moe_variants oil_backend oil_gpu)
+  add_oil_test(test_training tests/test_training.cpp oil_trainer oil_model oil_engine oil_math oil_core)
   # test_gpu needs explicit target definition due to CMake generator limitations
   add_executable(test_gpu tests/test_gpu.cpp)
   target_include_directories(test_gpu PRIVATE include)
@@ -261,7 +262,7 @@ if(OIL_BUILD_BENCHMARKS)
   target_link_libraries(bench_quality PRIVATE oil_inference oil_tokenizer oil_model oil_format)
 
   # J1-J15: All benchmarks
-  add_oil_bench(bench_all bench/bench_all.cpp oil_model oil_math oil_moe_variants oil_backend oil_format)
+  add_oil_bench(bench_all bench/bench_all.cpp oil_model oil_math oil_format)
 
   # Hardware-probe / auto-select benchmark
   add_oil_bench(bench_hardware tests/test_bench.cpp oil_backend oil_math)

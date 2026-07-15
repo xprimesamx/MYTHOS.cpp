@@ -1,6 +1,7 @@
 #pragma once
 #include "oil/tensor.h"
 #include "oil/types.h"
+#include "oil/math.h"
 #include <vector>
 #include <string>
 
@@ -83,7 +84,9 @@ TunedParams auto_tune_gemm(int64_t M, int64_t N, int64_t K);
 class GPUFallback {
 public:
     GPUFallback();
-    template<typename T> void gemm(float a, const Tensor& A, const Tensor& B, float b, Tensor& C);
+    template<typename T> void gemm(float a, const Tensor& A, const Tensor& B, float b, Tensor& C) {
+        math::gemm(a, A, B, b, C);
+    }
 };
 
 } // namespace gpu

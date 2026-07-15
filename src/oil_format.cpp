@@ -208,7 +208,7 @@ const OILHeader& OILReader::header() const {
 }
 
 std::vector<uint8_t> OILReader::read_config() const {
-    if (header_.config_size == 0) return {};
+    if (header_.config_size == 0 || !data_) return {};
     std::vector<uint8_t> cfg(header_.config_size);
     memcpy(cfg.data(), data_ + 16, header_.config_size);
     return cfg;
@@ -263,6 +263,7 @@ BlockData OILReader::read_block(uint32_t block_id) const {
 }
 
 Tensor OILReader::read_tensor(const std::string& name) const {
+    if (!data_) return Tensor();
     const uint8_t* p = data_ + tensor_table_offset_;
     uint32_t num_tensors; memcpy(&num_tensors, p, sizeof(num_tensors)); p += sizeof(uint32_t);
 
@@ -315,6 +316,7 @@ Tensor OILReader::read_tensor(const std::string& name) const {
 }
 
 std::vector<std::string> OILReader::tensor_names() const {
+    if (!data_) return {};
     std::vector<std::string> names;
     const uint8_t* p = data_ + tensor_table_offset_;
     uint32_t num_tensors; memcpy(&num_tensors, p, sizeof(num_tensors)); p += sizeof(uint32_t);
@@ -328,6 +330,7 @@ std::vector<std::string> OILReader::tensor_names() const {
 }
 
 std::vector<Format> OILReader::tensor_formats(const std::string& name) const {
+    if (!data_) return {};
     std::vector<Format> fmts;
     const uint8_t* p = data_ + tensor_table_offset_;
     uint32_t num_tensors; memcpy(&num_tensors, p, sizeof(num_tensors)); p += sizeof(uint32_t);

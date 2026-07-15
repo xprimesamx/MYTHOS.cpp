@@ -46,6 +46,7 @@ elseif(CMAKE_CXX_COMPILER_ID MATCHES "GNU")
 elseif(CMAKE_CXX_COMPILER_ID MATCHES "MSVC")
   message(STATUS "COMPILER: MSVC")
   add_compile_options(/W3 /utf-8)
+  add_definitions(-D_CRT_SECURE_NO_WARNINGS)
 
   if(CMAKE_BUILD_TYPE STREQUAL "Release")
     add_compile_options(/O2 /DNDEBUG)

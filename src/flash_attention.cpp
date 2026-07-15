@@ -4,9 +4,35 @@
 #include <cmath>
 #include <cstring>
 
+#if defined(OIL_AVX2) || defined(__AVX2__)
+#include <immintrin.h>
+#endif
+
 namespace oil {
 
 FlashAttention::FlashAttention(const FlashAttentionConfig& cfg) : cfg_(cfg) {}
+
+static inline float dot_product_avx2(const float* a, const float* b, int64_t d) {
+#if defined(OIL_AVX2) || defined(__AVX2__)
+    __m256 sumv = _mm256_setzero_ps();
+    int64_t i = 0;
+    for (; i + 8 <= d; i += 8) {
+        __m256 va = _mm256_loadu_ps(a + i);
+        __m256 vb = _mm256_loadu_ps(b + i);
+        sumv = _mm256_fmadd_ps(va, vb, sumv);
+    }
+    float hsum[8];
+    _mm256_storeu_ps(hsum, sumv);
+    float dot = hsum[0] + hsum[1] + hsum[2] + hsum[3]
+              + hsum[4] + hsum[5] + hsum[6] + hsum[7];
+    for (; i < d; i++) dot += a[i] * b[i];
+    return dot;
+#else
+    float dot = 0;
+    for (int64_t i = 0; i < d; i++) dot += a[i] * b[i];
+    return dot;
+#endif
+}
 
 Tensor flash_attention_forward(const Tensor& Q, const Tensor& K, const Tensor& V,
                                const Tensor& mask, float dropout_p) {
@@ -55,9 +81,7 @@ Tensor flash_attention_forward(const Tensor& Q, const Tensor& K, const Tensor& V
                     float qk_max = -INFINITY;
                     std::vector<float> scores(k_block);
                     for (int64_t j = 0; j < k_block; ++j) {
-                        float dot = 0;
-                        for (int64_t d = 0; d < D; ++d)
-                            dot += q_ptr[i * D + d] * k_block_data[j * D + d];
+                        float dot = dot_product_avx2(q_ptr + i * D, k_block_data.data() + j * D, D);
                         float masked = dot * scale;
                         if (m) masked += m[i * N + (jb + j)];
                         if (causal && (jb + j) > i) masked = -INFINITY;
@@ -69,14 +93,41 @@ Tensor flash_attention_forward(const Tensor& Q, const Tensor& K, const Tensor& V
                     float exp_diff = rm != -INFINITY ? std::exp(rm - new_rm) : 0.0f;
                     rs *= exp_diff;
 
+#if defined(OIL_AVX2) || defined(__AVX2__)
+                    {
+                        __m256 edv = _mm256_set1_ps(exp_diff);
+                        int64_t d = 0;
+                        for (; d + 8 <= D; d += 8) {
+                            __m256 ov = _mm256_loadu_ps(o_row + d);
+                            _mm256_storeu_ps(o_row + d, _mm256_mul_ps(ov, edv));
+                        }
+                        for (; d < D; d++) o_row[d] *= exp_diff;
+                    }
+#else
+                    for (int64_t d = 0; d < D; ++d)
+                        o_row[d] *= exp_diff;
+#endif
+
                     float sum_exp = 0;
                     for (int64_t j = 0; j < k_block; ++j) {
                         float e = std::exp(scores[j] - new_rm);
                         sum_exp += e;
-                        for (int64_t d = 0; d < D; ++d)
-                            o_row[d] *= exp_diff;
+#if defined(OIL_AVX2) || defined(__AVX2__)
+                        {
+                            __m256 ev = _mm256_set1_ps(e);
+                            int64_t d = 0;
+                            for (; d + 8 <= D; d += 8) {
+                                __m256 ov = _mm256_loadu_ps(o_row + d);
+                                __m256 vv = _mm256_loadu_ps(v_block_data.data() + j * D + d);
+                                _mm256_storeu_ps(o_row + d, _mm256_fmadd_ps(ev, vv, ov));
+                            }
+                            for (; d < D; d++)
+                                o_row[d] += e * v_block_data[j * D + d];
+                        }
+#else
                         for (int64_t d = 0; d < D; ++d)
                             o_row[d] += e * v_block_data[j * D + d];
+#endif
                     }
                     rs += sum_exp;
                     row_max[idx] = new_rm;
@@ -87,8 +138,20 @@ Tensor flash_attention_forward(const Tensor& Q, const Tensor& K, const Tensor& V
             for (int64_t i = 0; i < N; ++i) {
                 float inv_sum = 1.0f / (row_sum[b * H * N + h * N + i] + 1e-10f);
                 float* o_row = out + bh_off + i * D;
+#if defined(OIL_AVX2) || defined(__AVX2__)
+                {
+                    __m256 iv = _mm256_set1_ps(inv_sum);
+                    int64_t d = 0;
+                    for (; d + 8 <= D; d += 8) {
+                        __m256 ov = _mm256_loadu_ps(o_row + d);
+                        _mm256_storeu_ps(o_row + d, _mm256_mul_ps(ov, iv));
+                    }
+                    for (; d < D; d++) o_row[d] *= inv_sum;
+                }
+#else
                 for (int64_t d = 0; d < D; ++d)
                     o_row[d] *= inv_sum;
+#endif
             }
         }
     }

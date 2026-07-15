@@ -4,6 +4,7 @@
 #include "oil/sampler.h"
 #include <chrono>
 #include <sstream>
+#include <cstring>
 
 namespace oil {
 
@@ -35,7 +36,8 @@ std::vector<int> Generator::generate_tokens(const std::vector<int>& input_ids,
     Tensor logits = model_->forward(input_tensor, positions, &kv_cache_);
     int64_t vocab = logits.shape().dims[2];
     float* last_logits = (float*)logits.data() + (seq_len - 1) * vocab;
-    int next_token = sampler_.sample(last_logits, (int)vocab, cfg);
+    // Pass prompt tokens so repetition penalty applies from first sample
+    int next_token = sampler_.sample(last_logits, (int)vocab, cfg, input_ids);
 
     std::vector<int> output_ids(input_ids);
     output_ids.push_back(next_token);
@@ -69,8 +71,60 @@ std::string Generator::generate(const std::string& prompt, const SamplerConfig& 
 
 void Generator::generate_stream(const std::string& prompt, const SamplerConfig& cfg,
                                  std::function<void(const std::string&)> on_token) {
-    auto full_text = generate(prompt, cfg);
-    on_token(full_text);
+    // True token-by-token streaming (not fake whole-string dump)
+    auto ids = tokenizer_->encode(prompt);
+    if (ids.empty()) {
+        on_token("");
+        return;
+    }
+
+    int64_t seq_len = (int64_t)ids.size();
+    int64_t B = 1;
+
+    Tensor input_tensor(Shape{B, seq_len}, DType::F32);
+    float* id_ptr = input_tensor.data<float>();
+    for (size_t i = 0; i < ids.size(); i++) {
+        float fval = static_cast<float>(ids[i]);
+        std::memcpy(id_ptr + i, &fval, sizeof(float));
+    }
+
+    Tensor positions(Shape{B, seq_len}, DType::F32);
+    float* pos_ptr = positions.data<float>();
+    for (int64_t i = 0; i < seq_len; i++) {
+        float fval = static_cast<float>(i);
+        std::memcpy(pos_ptr + i, &fval, sizeof(float));
+    }
+
+    kv_cache_.init((int)model_->config.num_layers, model_->config.max_seq_len,
+                   model_->config.num_heads, model_->config.head_dim);
+    Tensor logits = model_->forward(input_tensor, positions, &kv_cache_);
+    int64_t vocab = logits.shape().dims[2];
+    float* last_logits = (float*)logits.data() + (seq_len - 1) * vocab;
+    int next_token = sampler_.sample(last_logits, (int)vocab, cfg, ids);
+
+    std::vector<int> history = ids;
+    history.push_back(next_token);
+    on_token(tokenizer_->decode({next_token}));
+
+    if (next_token == tokenizer_->eos_id()) return;
+
+    for (int t = 0; t < cfg.max_tokens - 1; t++) {
+        Tensor single_input(Shape{B, 1}, DType::F32);
+        float fval = static_cast<float>(next_token);
+        std::memcpy(single_input.data<float>(), &fval, sizeof(float));
+
+        Tensor single_pos(Shape{B, 1}, DType::F32);
+        float pval = static_cast<float>(seq_len + t);
+        std::memcpy(single_pos.data<float>(), &pval, sizeof(float));
+
+        logits = model_->forward(single_input, single_pos, &kv_cache_);
+        float* out = (float*)logits.data();
+        next_token = sampler_.sample(out, (int)vocab, cfg, history);
+        history.push_back(next_token);
+        on_token(tokenizer_->decode({next_token}));
+
+        if (next_token == tokenizer_->eos_id()) break;
+    }
 }
 
 GenerationResult Generator::generate_full(const std::string& prompt,

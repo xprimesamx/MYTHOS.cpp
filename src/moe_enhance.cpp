@@ -32,7 +32,7 @@ Tensor DenseToMoEPruner::prune_ffn(const Tensor& gate, const Tensor& up, const T
 // F3: MoE OIL format
 void MoEOILFormat::save_experts(const std::vector<Tensor>& experts,
                                  const std::string& path) {
-    FILE* fp; fopen_s(&fp, path.c_str(), "wb");
+    FILE* fp = std::fopen(path.c_str(), "wb");
     if (!fp) return;
     int32_t n = (int32_t)experts.size();
     fwrite(&n, sizeof(n), 1, fp);
@@ -46,7 +46,7 @@ void MoEOILFormat::save_experts(const std::vector<Tensor>& experts,
 
 std::vector<Tensor> MoEOILFormat::load_experts(const std::string& path) {
     std::vector<Tensor> experts;
-    FILE* fp; fopen_s(&fp, path.c_str(), "rb");
+    FILE* fp = std::fopen(path.c_str(), "rb");
     if (!fp) return experts;
     int32_t n = 0;
     fread(&n, sizeof(n), 1, fp);

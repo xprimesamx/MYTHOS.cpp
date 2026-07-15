@@ -3,6 +3,7 @@
 #include "oil/math.h"
 #include <cstring>
 #include <unordered_map>
+#include <stdexcept>
 
 namespace oil {
 
@@ -57,11 +58,11 @@ Tensor DenseModel::forward(const Tensor& input_ids, const Tensor& positions,
         active_cache = &local_cache;
     }
 
-    Tensor causal_mask(Shape{1, 1, S, config.max_seq_len});
+    Tensor causal_mask(Shape{1, 1, S, S});
     float* md = causal_mask.data<float>();
     for (int64_t s = 0; s < S; s++) {
-        for (int64_t t = 0; t < config.max_seq_len; t++) {
-            md[s * config.max_seq_len + t] = (t > s) ? -INFINITY : 0.0f;
+        for (int64_t t = 0; t < S; t++) {
+            md[s * S + t] = (t > s) ? -INFINITY : 0.0f;
         }
     }
 
@@ -167,6 +168,7 @@ void DenseModel::save(const std::string& oil_path) const {
 
 void DenseModel::load(const std::string& oil_path) {
     OILReader reader(oil_path);
+    if (!reader.valid()) throw std::runtime_error("Cannot open: " + oil_path);
     if (reader.header().config_size >= sizeof(TransformerConfig)) {
         auto cfg_data = reader.read_config();
         if (cfg_data.size() >= sizeof(TransformerConfig)) {
@@ -210,6 +212,7 @@ void DenseModel::load(const std::string& oil_path) {
 
 void Model::load(const std::string& oil_path) {
     OILReader reader(oil_path);
+    if (!reader.valid()) throw std::runtime_error("Cannot open: " + oil_path);
     if (reader.header().config_size >= sizeof(TransformerConfig)) {
         auto cfg_data = reader.read_config();
         if (cfg_data.size() >= sizeof(TransformerConfig)) {

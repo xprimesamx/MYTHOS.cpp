@@ -81,7 +81,7 @@ struct MoEAllConfig {
     int64_t num_slots_per_expert = 1;
 
     // Expert Choice
-    int64_t capacity_factor = 2;
+    float capacity_factor = 2.0f;
 
     // Hash MoE
     int64_t hash_bucket_size = 2;

@@ -54,7 +54,7 @@ RouterOutput MoERouter::forward(const Tensor& x, const Tensor& modality_hints) {
     int64_t num_mod = 9;
 
     // 1. Classify modality of each token
-    Tensor mod_logits = modality_cls.forward(x);
+    Tensor mod_logits = modality_hints;
     Tensor mod_probs({T, num_mod});
     math::softmax(mod_logits, mod_probs, 1);
 
@@ -92,7 +92,7 @@ RouterOutput MoERouter::forward(const Tensor& x, const Tensor& modality_hints) {
     Tensor probs({T, E});
     math::softmax(gating_logits, probs, 1);
 
-    Tensor indices({T, K});
+    Tensor indices({T, K}, DType::I64);
     Tensor weights({T, K});
     float* p_ptr = probs.data<float>();
     float* w_ptr = weights.data<float>();
@@ -138,7 +138,7 @@ RouterOutput MoERouter::forward(const Tensor& x, const Tensor& modality_hints) {
     out.modality_probs = mod_probs.reshape({B, S, num_mod});
     out.dominant_modality = dominant;
     out.load_balance_loss = (float)load_balance;
-    float z_lse = 0.0f;
+    double z_lse = 0.0;
     for (int64_t t = 0; t < T; ++t) {
         float row_max = gl[t * E];
         for (int64_t e = 1; e < E; ++e)
@@ -147,7 +147,7 @@ RouterOutput MoERouter::forward(const Tensor& x, const Tensor& modality_hints) {
         for (int64_t e = 0; e < E; ++e)
             lse += std::exp((double)(gl[t * E + e] - row_max));
         lse = (double)row_max + std::log(lse);
-        z_lse += (float)(lse * lse);
+        z_lse += lse * lse;
     }
     out.z_loss = config_.z_loss_coef * z_lse / (float)T;
     return out;
@@ -197,7 +197,6 @@ Tensor MoEFFN::forward(const Tensor& x, const RouterOutput& routing) {
     const float* x_ptr = x_flat.data<float>();
     float* o_ptr = output.data<float>();
 
-    double z_loss = 0.0;
     for (int64_t t = 0; t < T; ++t) {
         for (int64_t k = 0; k < K; ++k) {
             int64_t e = idx_ptr[t * K + k];
@@ -211,12 +210,9 @@ Tensor MoEFFN::forward(const Tensor& x, const RouterOutput& routing) {
 
             for (int64_t h = 0; h < hidden; ++h)
                 o_ptr[t * hidden + h] += weight * expert_out.data<float>()[h];
-
-            for (int64_t h = 0; h < hidden; ++h)
-                z_loss += (double)expert_out.data<float>()[h] * expert_out.data<float>()[h];
         }
     }
-    last_z_loss = (float)(config_.z_loss_coef * z_loss / (double)T);
+    last_z_loss = routing.z_loss;
 
     Tensor out = output.reshape({B, S, hidden});
     return out;
@@ -339,8 +335,9 @@ Tensor MoMBlock::forward(const Tensor& x, const Tensor& positions,
 
     Tensor result({residual.shape()});
     math::add(residual, moe_out, result);
-    math::add(result, cross_out, result);
-    return result;
+    Tensor final_result({result.shape()});
+    math::add(result, cross_out, final_result);
+    return final_result;
 }
 
 } // namespace moe

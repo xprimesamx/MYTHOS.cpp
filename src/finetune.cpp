@@ -3,6 +3,7 @@
 #include "oil/tokenizer.h"
 #include "oil/trainer.h"
 #include "oil/transformer.h"
+#include "oil/autograd.h"
 #include <fstream>
 #include <cmath>
 
@@ -40,7 +41,7 @@ void FineTuner::configure(const FineTuneConfig& cfg) {
     cfg_ = cfg;
     optimizer_.set_lr(cfg.learning_rate);
     optimizer_.set_weight_decay(0);
-    optimizer_.set_schedule(AdamW::WARMUP_COSINE, cfg.warmup_steps, cfg.num_epochs * 1000);
+    optimizer_.set_schedule(AdamW::Schedule::WARMUP_COSINE, cfg.warmup_steps, cfg.num_epochs * 1000);
 
     DenseModel* dm = dynamic_cast<DenseModel*>(model_);
     if (dm) {
@@ -59,30 +60,42 @@ void FineTuner::fine_tune(DataLoader& dataloader) {
     Tensor input_ids(Shape{cfg_.batch_size, cfg_.seq_length}, DType::F32);
     Tensor labels(Shape{cfg_.batch_size, cfg_.seq_length}, DType::F32);
 
+    const bool prev_ag = AutogradEngine::enabled();
+    AutogradEngine::set_enabled(true);
+    unfreeze_for_finetune();
+
     for (int epoch = 0; epoch < cfg_.num_epochs; epoch++) {
         dataloader.reset();
         int batch_idx = 0;
-        while (dataloader.next_batch(input_ids, labels)) {
+    while (dataloader.next_batch(input_ids, labels)) {
             Tensor logits = model_->forward(input_ids, input_ids);
             Tensor loss = cross_entropy_loss(logits, labels);
-            Tensor grad = cross_entropy_grad(logits, labels);
 
-            float* gd = (float*)grad.data();
-            int64_t gn = grad.numel();
+            optimizer_.zero_grad();
+            AutogradEngine::instance().backward(loss);
+
             float grad_norm = 0;
-            for (int64_t i = 0; i < gn; i++) grad_norm += gd[i] * gd[i];
-            grad_norm = std::sqrt(grad_norm / (float)gn);
+            DenseModel* dm = dynamic_cast<DenseModel*>(model_);
+            if (dm) {
+                std::vector<Tensor*> params;
+                collect_params(dm, params);
+                for (auto* p : params) {
+                    if (p->requires_grad() && p->has_grad()) {
+                        const float* g = (const float*)p->grad().data<float>();
+                        for (int64_t i = 0; i < p->numel(); ++i)
+                            grad_norm += g[i] * g[i];
+                    }
+                }
+            }
+            grad_norm = std::sqrt(grad_norm);
             if (grad_norm < cfg_.grad_threshold) {
                 batch_idx++;
                 continue;
             }
-
-            optimizer_.zero_grad();
-            AutogradEngine::instance().backward(loss);
             optimizer_.step();
 
             if (batch_idx % cfg_.log_interval == 0) {
-                float loss_val = *(const float*)loss.data();
+                float loss_val = loss.numel() > 0 ? loss.data<float>()[0] : 0.0f;
                 (void)loss_val;
             }
             if (batch_idx % cfg_.save_interval == 0 && cfg_.save_interval > 0) {
@@ -91,6 +104,8 @@ void FineTuner::fine_tune(DataLoader& dataloader) {
             batch_idx++;
         }
     }
+
+    AutogradEngine::set_enabled(prev_ag);
     save(cfg_.output_path);
 }
 

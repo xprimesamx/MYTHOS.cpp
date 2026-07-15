@@ -224,6 +224,8 @@ Tensor Attention::forward(const Tensor& x, const Tensor& positions,
                             sum += qptr[d] * kptr[d];
 #endif
                         sd[s_base + s * S_full + t] = sum * scale;
+                        if (S > 1 && t > s)
+                            sd[s_base + s * S_full + t] = -INFINITY;
                     }
                 }
             }
@@ -252,9 +254,12 @@ Tensor Attention::forward(const Tensor& x, const Tensor& positions,
 
                     __m256 sumv = _mm256_setzero_ps();
                     __m256 mvec = _mm256_set1_ps(max_v);
+                    __m256 clamp_lo = _mm256_set1_ps(-20.0f);
+                    __m256 zero8 = _mm256_setzero_ps();
                     for (t = 0; t + 8 <= S_full; t += 8) {
                         __m256 sv = _mm256_loadu_ps(sd + row + t);
                         sv = _mm256_sub_ps(sv, mvec);
+                        sv = _mm256_max_ps(sv, clamp_lo);
                         __m256 x = sv;
                         __m256 e = _mm256_set1_ps(1.0f);
                         __m256 term = x;
@@ -265,6 +270,7 @@ Tensor Attention::forward(const Tensor& x, const Tensor& positions,
                         e = _mm256_add_ps(e, _mm256_mul_ps(term, _mm256_set1_ps(1.0f/6.0f)));
                         term = _mm256_mul_ps(term, x);
                         e = _mm256_add_ps(e, _mm256_mul_ps(term, _mm256_set1_ps(1.0f/24.0f)));
+                        e = _mm256_blendv_ps(e, zero8, _mm256_cmp_ps(sv, clamp_lo, _CMP_LE_OQ));
                         _mm256_storeu_ps(wd + row + t, e);
                         sumv = _mm256_add_ps(sumv, e);
                     }

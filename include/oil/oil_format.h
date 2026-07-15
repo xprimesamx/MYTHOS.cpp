@@ -70,6 +70,9 @@ public:
     Tensor read_tensor(const std::string& name) const;
     std::vector<std::string> tensor_names() const;
     
+    // Check if file was successfully opened
+    bool valid() const { return data_ != nullptr; }
+
     // Get format info for a tensor
     std::vector<Format> tensor_formats(const std::string& name) const;
     

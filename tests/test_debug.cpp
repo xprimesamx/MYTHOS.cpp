@@ -3,6 +3,7 @@
 #include "oil/tensor.h"
 #include <cstdio>
 #include <cstdlib>
+#include <cstring>
 
 int main() {
     oil::TransformerConfig cfg;
@@ -21,8 +22,10 @@ int main() {
     oil::Tensor positions(oil::Shape{B, S}, oil::DType::F32);
     unsigned int seed = 42;
     for (int64_t i = 0; i < B*S; i++) {
-        ((int*)input_ids.data())[i] = (int)((seed >> 16) % cfg.vocab_size);
-        ((int*)positions.data())[i] = (int)(i % S);
+        float tid = static_cast<float>((int)((seed >> 16) % cfg.vocab_size));
+        float pid = static_cast<float>((int)(i % S));
+        std::memcpy(input_ids.data<float>() + i, &tid, sizeof(float));
+        std::memcpy(positions.data<float>() + i, &pid, sizeof(float));
         seed = seed * 1103515245u + 12345u;
     }
     std::fprintf(stderr, "Input ready, calling forward\n"); std::fflush(stderr);

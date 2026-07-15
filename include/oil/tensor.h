@@ -55,7 +55,13 @@ public:
 
     bool requires_grad() const { return requires_grad_; }
     void requires_grad(bool req) { requires_grad_ = req; }
-    Tensor& grad() const { return *grad_; }
+    Tensor& grad() const {
+        if (!grad_) {
+            static Tensor empty_grad;
+            return empty_grad;
+        }
+        return *grad_;
+    }
     bool has_grad() const { return grad_ != nullptr; }
     void set_grad(const Tensor& g) { delete grad_; grad_ = new Tensor(g); }
     void zero_grad() { if (grad_) grad_->zero_(); }

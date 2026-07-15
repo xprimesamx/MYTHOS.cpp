@@ -32,7 +32,7 @@ Tensor STEQuantizer::forward(const Tensor& fp32_weight) {
             quantize_ternary(src, packed.data(), &scale, n);
             for (int64_t i = 0; i < n; i++) {
                 int v = (packed[i / 4] >> (2 * (i % 4))) & 3;
-                rd[i] = (float)(v == 0 ? -1 : v == 1 ? 0 : 1) * scale;
+                rd[i] = (float)(v == 1 ? 1 : v == 2 ? -1 : 0) * scale;
             }
             break;
         }
@@ -157,7 +157,7 @@ Tensor STEQuantizer::forward_mixed(const Tensor& weights, const std::vector<Form
                 quantize_ternary(src + block_start, packed.data(), &scale, block_n);
                 for (int64_t i = 0; i < block_n; i++) {
                     int v = (packed[(size_t)i / 4] >> (2 * (i % 4))) & 3;
-                    rd[block_start + i] = (float)(v == 0 ? -1 : v == 1 ? 0 : 1) * scale;
+                    rd[block_start + i] = (float)(v == 1 ? 1 : v == 2 ? -1 : 0) * scale;
                 }
                 break;
             }

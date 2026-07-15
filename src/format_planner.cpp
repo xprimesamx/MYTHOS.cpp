@@ -15,15 +15,15 @@ void FormatPlanner::score_importance(const Tensor& weights,
     const float* wd = (const float*)weights.data();
     const float* ad = (const float*)calibration_activations.data();
     int64_t n = weights.numel();
-    int num_blocks = (int)(n / block_size);
+    int64_t num_blocks = n / block_size;
     if (n % block_size != 0) num_blocks++;
-    importance_scores_.resize(num_blocks);
+    importance_scores_.resize((size_t)num_blocks);
 
-    for (int b = 0; b < num_blocks; b++) {
+    for (int64_t b = 0; b < num_blocks; b++) {
         double score = 0;
-        int start = b * block_size;
-        int end = (std::min)(start + block_size, (int)n);
-        for (int i = start; i < end; i++) {
+        int64_t start = b * block_size;
+        int64_t end = (std::min)(start + block_size, n);
+        for (int64_t i = start; i < end; i++) {
             float w = wd[i];
             float a = ad ? std::fabs(ad[i]) : 1.0f;
             score += (double)std::fabs(w) * (double)a;
@@ -38,14 +38,14 @@ void FormatPlanner::score_importance_fisher(const Tensor& weights,
     const float* wd = (const float*)weights.data();
     const float* gd = (const float*)gradients.data();
     int64_t n = weights.numel();
-    int num_blocks = (int)(n / block_size);
+    int64_t num_blocks = n / block_size;
     if (n % block_size != 0) num_blocks++;
-    importance_scores_.resize(num_blocks);
+    importance_scores_.resize((size_t)num_blocks);
 
-    for (int b = 0; b < num_blocks; b++) {
+    for (int64_t b = 0; b < num_blocks; b++) {
         double score = 0;
-        int start = b * block_size;
-        int end = (std::min)(start + block_size, (int)n);
+        int64_t start = b * block_size;
+        int64_t end = (std::min)(start + block_size, n);
         for (int i = start; i < end; i++) {
             float g = gd[i];
             score += (double)(g * g);

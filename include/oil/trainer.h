@@ -13,6 +13,7 @@
 #include <thread>
 #include <mutex>
 #include <queue>
+#include <atomic>
 
 namespace oil {
 
@@ -127,7 +128,7 @@ private:
     std::thread prefetch_thread_;
     std::mutex prefetch_mutex_;
     std::queue<std::pair<Tensor, Tensor>> prefetch_queue_;
-    volatile bool prefetch_running_ = false;
+    std::atomic<bool> prefetch_running_{false};
     void prefetch_worker();
     void start_prefetch();
     void stop_prefetch();

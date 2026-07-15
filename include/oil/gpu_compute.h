@@ -94,8 +94,30 @@ public:
 
     void gemm(float alpha, const void* A, const void* B, float beta, void* C,
               int64_t M, int64_t N, int64_t K);
+    void gemv(float alpha, const void* A, const void* x, float beta, void* y,
+              int64_t M, int64_t N);
+
+    void relu(const void* x, void* y, int64_t n);
+    void gelu(const void* x, void* y, int64_t n);
+    void silu(const void* x, void* y, int64_t n);
+    void add(const void* a, const void* b, void* c, int64_t n);
+    void mul(const void* a, const void* b, void* c, int64_t n);
+    void scale(float s, const void* x, void* y, int64_t n);
+
     void softmax(const void* x, void* y, int64_t rows, int64_t cols);
+    void rms_norm(const void* x, const void* gamma, void* y, float eps,
+                  int64_t n, int64_t d);
+    void layer_norm(const void* x, const void* gamma, const void* beta, void* y,
+                    float eps, int64_t n, int64_t d);
+
+    void moe_gather(const void* x, const int64_t* indices, const float* weights,
+                    void* out, int64_t T, int64_t K, int64_t D);
+    void moe_scatter_add(void* out, const int64_t* indices, const float* weights,
+                         const void* expert_out, int64_t T, int64_t K, int64_t D);
+
     void synchronize();
+    int64_t memory_free() const;
+    int64_t memory_total() const;
 
 private:
     struct Impl;

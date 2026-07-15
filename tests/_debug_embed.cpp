@@ -3,6 +3,7 @@
 #include "oil/tensor.h"
 #include "oil/types.h"
 #include <iostream>
+#include <cstring>
 
 int main() {
     std::cout << "Starting..." << std::endl;
@@ -28,8 +29,10 @@ int main() {
     oil::Tensor positions(oil::Shape{B, S}, oil::DType::F32);
     
     for (int64_t i = 0; i < B * S; i++) {
-        ((int*)input_ids.data())[i] = (int)((i * 7 + 3) % 100);
-        ((int*)positions.data())[i] = (int)(i % S);
+        float tid = static_cast<float>((int)((i * 7 + 3) % 100));
+        float pid = static_cast<float>((int)(i % S));
+        std::memcpy(input_ids.data<float>() + i, &tid, sizeof(float));
+        std::memcpy(positions.data<float>() + i, &pid, sizeof(float));
     }
     
     std::cout << "Calling forward..." << std::endl;

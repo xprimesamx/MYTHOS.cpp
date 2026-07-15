@@ -187,7 +187,10 @@ static void bench_attention() {
                 float* s = score.data<float>() + h * S * S;
                 oil::kernel::scalar_gemm(q, kt, s, S, S, head_dim);
                 for (int64_t i = 0; i < (int64_t)S * S; i++) s[i] *= (float)scale;
-                oil::math::softmax(score, score, 2);
+                oil::Tensor head_score(oil::Shape{S, S}, oil::DType::F32);
+                std::memcpy(head_score.data<float>(), s, S * S * sizeof(float));
+                oil::math::softmax(head_score, head_score, 1);
+                std::memcpy(s, head_score.data<float>(), S * S * sizeof(float));
             }
         }
         double gemm_us = (now_sec() - t0) / iters * 1e6;

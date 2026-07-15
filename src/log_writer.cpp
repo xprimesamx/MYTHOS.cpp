@@ -17,19 +17,23 @@ static int64_t current_wall_time() {
 }
 
 static uint32_t masked_crc32c(const uint8_t* data, size_t len) {
-    uint32_t crc = 0xFFFFFFFF;
-    static const uint32_t table[16] = {
-        0x00000000, 0x105EC76F, 0x20A0DE86, 0x30DE19E9,
-        0x41464B0C, 0x51488C63, 0x6156958A, 0x710852E5,
-        0x82889618, 0x92D65177, 0xA228489E, 0xB2768FF1,
-        0xC3EEDD14, 0xD3B01A7B, 0xE3AE0392, 0xF3F0C4FD,
-    };
-    for (size_t i = 0; i < len; i++) {
-        crc ^= data[i];
-        crc = (crc >> 4) ^ table[crc & 0x0F];
-        crc = (crc >> 4) ^ table[crc & 0x0F];
+    static uint32_t table[256];
+    static bool table_init = false;
+    if (!table_init) {
+        const uint32_t poly = 0x82F63B78;
+        for (uint32_t i = 0; i < 256; i++) {
+            uint32_t crc = i;
+            for (int j = 0; j < 8; j++)
+                crc = (crc >> 1) ^ (poly & (-(int32_t)(crc & 1)));
+            table[i] = crc;
+        }
+        table_init = true;
     }
-    return crc ^ 0xFFFFFFFF;
+    uint32_t crc = 0xFFFFFFFF;
+    for (size_t i = 0; i < len; i++)
+        crc = (crc >> 8) ^ table[(crc ^ data[i]) & 0xFF];
+    crc ^= 0xFFFFFFFF;
+    return ((crc >> 15) | (crc << 17)) + 0xa282ead8UL;
 }
 
 static uint32_t masked_crc32c(const std::string& s) {

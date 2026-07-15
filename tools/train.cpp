@@ -104,7 +104,7 @@ int main(int argc, char** argv) {
 
     oil::Trainer trainer(&model, &tokenizer);
     oil::AdamW optimizer(args.learning_rate);
-    optimizer.set_schedule(oil::AdamW::WARMUP_COSINE, 100, 10000);
+    optimizer.set_schedule(oil::AdamW::Schedule::WARMUP_COSINE, 100, 10000);
     trainer.compile(&optimizer);
 
     oil::DataLoader dataloader(&tokenizer, args.data_path,

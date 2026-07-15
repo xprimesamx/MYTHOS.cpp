@@ -18,25 +18,37 @@ QuantizeParams quantize_tensor(const Tensor& src, Tensor& dst) {
     const float* src_data = src.data<float>();
     int64_t n = src.numel();
 
-    float max_abs = 0.0f;
-    for (int64_t i = 0; i < n; i++) {
-        float v = std::abs(src_data[i]);
-        if (v > max_abs) max_abs = v;
+    float min_v = 0.0f, max_v = 0.0f;
+    if (n > 0) {
+        min_v = max_v = src_data[0];
+        for (int64_t i = 1; i < n; i++) {
+            min_v = std::min(min_v, src_data[i]);
+            max_v = std::max(max_v, src_data[i]);
+        }
     }
-    if (max_abs == 0.0f) max_abs = 1.0f;
+    // Asymmetric affine: q = round(x / inv_scale + zero_point), x in [min, max] -> [0, 255]
+    float range = max_v - min_v;
+    if (range < 1e-12f) range = 1.0f;
 
     QuantizeParams params;
-    params.scale = 127.0f / max_abs;
-    params.inv_scale = max_abs / 127.0f;
+    params.inv_scale = range / 255.0f;
+    params.scale = 1.0f / params.inv_scale;
+    params.zero_point = -min_v * params.scale; // so min maps near 0
 
     if (dst.dtype() == DType::U8) {
         uint8_t* dst_data = dst.data<uint8_t>();
         for (int64_t i = 0; i < n; i++) {
-            float val = src_data[i] * params.scale;
-            dst_data[i] = static_cast<uint8_t>(std::clamp(std::round(val), 0.0f, 255.0f));
+            float q = std::round(src_data[i] * params.scale + params.zero_point);
+            dst_data[i] = static_cast<uint8_t>(std::clamp(q, 0.0f, 255.0f));
         }
     } else if (dst.dtype() == DType::F32) {
+        // Keep scaled representation without zero-point for F32 dest (legacy path)
         float* dst_data = dst.data<float>();
+        float max_abs = std::max(std::abs(min_v), std::abs(max_v));
+        if (max_abs < 1e-12f) max_abs = 1.0f;
+        params.scale = 127.0f / max_abs;
+        params.inv_scale = max_abs / 127.0f;
+        params.zero_point = 0.0f;
         for (int64_t i = 0; i < n; i++) {
             dst_data[i] = src_data[i] * params.scale;
         }
@@ -73,7 +85,8 @@ Tensor dequantize(const Tensor& src, const QuantizeParams& params) {
     if (src.dtype() == DType::U8) {
         const uint8_t* src_data = src.data<uint8_t>();
         for (int64_t i = 0; i < n; i++) {
-            out_data[i] = static_cast<float>(src_data[i]) * params.inv_scale;
+            // Asymmetric dequant: (q - zero_point) * inv_scale
+            out_data[i] = (static_cast<float>(src_data[i]) - params.zero_point) * params.inv_scale;
         }
     } else if (src.dtype() == DType::F32) {
         const float* src_data = src.data<float>();

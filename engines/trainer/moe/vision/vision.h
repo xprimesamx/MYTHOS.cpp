@@ -33,6 +33,7 @@ public:
     Tensor bbox_head;
     Tensor class_head;
     Tensor object_query;
+    Tensor q_proj, k_proj, v_proj;
     int64_t hidden_size;
     int64_t num_classes;
     int64_t max_detections;

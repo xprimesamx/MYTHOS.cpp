@@ -17,6 +17,11 @@ void launch_cuda_mul(float* c, const float* a, const float* b, int n);
 void launch_cuda_scale(float* y, const float* x, float s, int n);
 void launch_cuda_embedding(float* out, const float* table,
                             const int* indices, int B, int S, int D);
+void launch_cuda_moe_gather(float* out, const float* x,
+                             const int64_t* indices, const float* weights,
+                             int T, int K, int D);
+void launch_cuda_gemm(float alpha, const float* A, const float* B,
+                       float beta, float* C, int M, int N, int K);
 
 // cuBLAS convenience wrapper
 static inline cublasStatus_t cublas_gemm(cublasHandle_t handle, int M, int N, int K,
@@ -1070,6 +1075,118 @@ void CUDABackend::gemm(float alpha, const void* A, const void* B, float beta,
 void CUDABackend::softmax(const void* x, void* y, int64_t rows, int64_t cols) {
 #ifdef OIL_HAS_CUDA
     launch_cuda_softmax((float*)y, (const float*)x, (int)rows, (int)cols);
+#endif
+}
+
+void CUDABackend::gemv(float alpha, const void* A, const void* x, float beta,
+                        void* y, int64_t M, int64_t N) {
+#ifdef OIL_HAS_CUDA
+    cublasHandle_t handle = (cublasHandle_t)impl_->cublas_handle_;
+    float alpha_f = alpha, beta_f = beta;
+    cublasGemmEx(handle, CUBLAS_OP_N, CUBLAS_OP_T,
+                 1, (int)M, (int)N,
+                 &alpha_f, x, CUDA_R_32F, (int)N,
+                 A, CUDA_R_32F, (int)N,
+                 &beta_f, y, CUDA_R_32F, 1);
+#endif
+}
+
+void CUDABackend::relu(const void* x, void* y, int64_t n) {
+#ifdef OIL_HAS_CUDA
+    launch_cuda_relu((float*)y, (const float*)x, (int)n);
+#endif
+}
+
+void CUDABackend::gelu(const void* x, void* y, int64_t n) {
+#ifdef OIL_HAS_CUDA
+    launch_cuda_gelu((float*)y, (const float*)x, (int)n);
+#endif
+}
+
+void CUDABackend::silu(const void* x, void* y, int64_t n) {
+#ifdef OIL_HAS_CUDA
+    launch_cuda_silu((float*)y, (const float*)x, (int)n);
+#endif
+}
+
+void CUDABackend::add(const void* a, const void* b, void* c, int64_t n) {
+#ifdef OIL_HAS_CUDA
+    launch_cuda_add((float*)c, (const float*)a, (const float*)b, (int)n);
+#endif
+}
+
+void CUDABackend::mul(const void* a, const void* b, void* c, int64_t n) {
+#ifdef OIL_HAS_CUDA
+    launch_cuda_mul((float*)c, (const float*)a, (const float*)b, (int)n);
+#endif
+}
+
+void CUDABackend::scale(float s, const void* x, void* y, int64_t n) {
+#ifdef OIL_HAS_CUDA
+    launch_cuda_scale((float*)y, (const float*)x, s, (int)n);
+#endif
+}
+
+void CUDABackend::rms_norm(const void* x, const void* gamma, void* y,
+                            float eps, int64_t n, int64_t d) {
+#ifdef OIL_HAS_CUDA
+    launch_cuda_rmsnorm((float*)y, (const float*)x, (const float*)gamma,
+                         eps, (int)n, (int)d);
+#endif
+}
+
+void CUDABackend::layer_norm(const void* x, const void* gamma, const void* beta,
+                              void* y, float eps, int64_t n, int64_t d) {
+#ifdef OIL_HAS_CUDA
+    launch_cuda_layernorm((float*)y, (const float*)x, (const float*)gamma,
+                           (const float*)beta, eps, (int)n, (int)d);
+#endif
+}
+
+void CUDABackend::moe_gather(const void* x, const int64_t* indices,
+                              const float* weights, void* out,
+                              int64_t T, int64_t K, int64_t D) {
+#ifdef OIL_HAS_CUDA
+    launch_cuda_moe_gather((float*)out, (const float*)x, indices, weights,
+                            (int)T, (int)K, (int)D);
+#endif
+}
+
+void CUDABackend::moe_scatter_add(void* out, const int64_t* indices,
+                                   const float* weights, const void* expert_out,
+                                   int64_t T, int64_t K, int64_t D) {
+#ifdef OIL_HAS_CUDA
+    const float* eo = (const float*)expert_out;
+    float* o = (float*)out;
+    for (int64_t t = 0; t < T; t++) {
+        for (int64_t k = 0; k < K; k++) {
+            int64_t expert = indices[t * K + k];
+            float w = weights[t * K + k];
+            for (int64_t d = 0; d < D; d++) {
+                o[expert * D + d] += w * eo[t * D + d];
+            }
+        }
+    }
+#endif
+}
+
+int64_t CUDABackend::memory_free() const {
+#ifdef OIL_HAS_CUDA
+    size_t free_mem = 0, total_mem = 0;
+    cudaMemGetInfo(&free_mem, &total_mem);
+    return (int64_t)free_mem;
+#else
+    return 0;
+#endif
+}
+
+int64_t CUDABackend::memory_total() const {
+#ifdef OIL_HAS_CUDA
+    size_t free_mem = 0, total_mem = 0;
+    cudaMemGetInfo(&free_mem, &total_mem);
+    return (int64_t)total_mem;
+#else
+    return 0;
 #endif
 }
 

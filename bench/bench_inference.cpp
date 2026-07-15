@@ -63,8 +63,10 @@ int main() {
             oil::Tensor positions(oil::Shape{B, S}, oil::DType::F32);
 
             for (int64_t i = 0; i < S; i++) {
-                ((int*)input_ids.data())[i] = (int)((i * 7) % cfg.vocab_size);
-                ((int*)positions.data())[i] = (int)i;
+                float fval = static_cast<float>((int)((i * 7) % cfg.vocab_size));
+                float pval = static_cast<float>(static_cast<int>(i));
+                std::memcpy(input_ids.data<float>() + i, &fval, sizeof(float));
+                std::memcpy(positions.data<float>() + i, &pval, sizeof(float));
             }
 
             // Warmup
@@ -100,8 +102,9 @@ int main() {
 
         oil::Tensor single_in(oil::Shape{1, 1}, oil::DType::F32);
         oil::Tensor single_pos(oil::Shape{1, 1}, oil::DType::F32);
-        ((int*)single_in.data())[0] = 0;
-        ((int*)single_pos.data())[0] = 0;
+        float zero_val = 0.0f;
+        std::memcpy(single_in.data<float>(), &zero_val, sizeof(float));
+        std::memcpy(single_pos.data<float>(), &zero_val, sizeof(float));
 
         // Warmup
         for (int i = 0; i < 20; i++)

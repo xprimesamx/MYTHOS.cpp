@@ -302,9 +302,12 @@ static void softmax_forward_avx2(float* output, const float* input, int64_t cols
 #if defined(OIL_AVX2) || defined(__AVX2__)
     __m256 sumv = _mm256_setzero_ps();
     __m256 max_bc = _mm256_set1_ps(max_val);
+    __m256 clamp_lo = _mm256_set1_ps(-20.0f);
+    __m256 zero8 = _mm256_setzero_ps();
     for (i = 0; i + 8 <= cols; i += 8) {
         __m256 v = _mm256_loadu_ps(input + i);
         v = _mm256_sub_ps(v, max_bc);
+        v = _mm256_max_ps(v, clamp_lo);
         __m256 x = v;
         __m256 result = _mm256_set1_ps(1.0f);
         __m256 term = x;
@@ -315,6 +318,7 @@ static void softmax_forward_avx2(float* output, const float* input, int64_t cols
         result = _mm256_add_ps(result, _mm256_mul_ps(term, _mm256_set1_ps(1.0f/6.0f)));
         term = _mm256_mul_ps(term, x);
         result = _mm256_add_ps(result, _mm256_mul_ps(term, _mm256_set1_ps(1.0f/24.0f)));
+        result = _mm256_blendv_ps(result, zero8, _mm256_cmp_ps(v, clamp_lo, _CMP_LE_OQ));
         _mm256_storeu_ps(output + i, result);
         sumv = _mm256_add_ps(sumv, result);
     }
@@ -379,7 +383,9 @@ public:
         float* wd = attn_weights.data<float>();
         float* od = attn_out.data<float>();
 
-        // score = Q @ K^T * scale
+        // score = Q @ K^T * scale (+ causal mask for self-attention training)
+        // When S_full == S we are in the training self-attention path: apply causal mask.
+        const bool causal = (S_full_ == S_);
         for (int64_t b = 0; b < B_; b++) {
             for (int64_t h = 0; h < H_; h++) {
                 int64_t kh = h % KV_H_;
@@ -389,6 +395,10 @@ public:
                     int64_t q_off = ((b * H_ + h) * S_ + s) * D_;
                     int64_t score_row = h_base + s * S_full_;
                     for (int64_t t = 0; t < S_full_; t++) {
+                        if (causal && t > s) {
+                            sd[score_row + t] = -FLT_MAX / 4.0f; // large negative, avoids NaN in exp
+                            continue;
+                        }
                         int64_t k_off = kh_off + t * D_;
                         float sum = 0;
                         for (int64_t d = 0; d < D_; d++)
@@ -399,13 +409,26 @@ public:
             }
         }
 
-        // softmax
+        // softmax (masked positions stay ~0 after exp of large negative)
         for (int64_t b = 0; b < B_; b++) {
             for (int64_t h = 0; h < H_; h++) {
                 int64_t h_base = (b * H_ + h) * S_ * S_full_;
                 for (int64_t s = 0; s < S_; s++) {
                     int64_t row = h_base + s * S_full_;
                     softmax_forward_avx2(wd + row, sd + row, S_full_);
+                    if (causal) {
+                        // Hard-zero future tokens for numerical cleanliness
+                        for (int64_t t = s + 1; t < S_full_; t++)
+                            wd[row + t] = 0.0f;
+                        // Renormalize prefix so weights sum to 1
+                        float z = 0.0f;
+                        for (int64_t t = 0; t <= s && t < S_full_; t++) z += wd[row + t];
+                        if (z > 0.0f) {
+                            float inv = 1.0f / z;
+                            for (int64_t t = 0; t <= s && t < S_full_; t++)
+                                wd[row + t] *= inv;
+                        }
+                    }
                 }
             }
         }

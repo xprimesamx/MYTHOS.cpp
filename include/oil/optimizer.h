@@ -39,13 +39,13 @@ public:
     void set_weight_decay(float wd);
 
     void scheduler_step(int step);
-    enum Schedule { CONSTANT, COSINE, LINEAR, WARMUP_COSINE };
+    enum class Schedule { CONSTANT, COSINE, LINEAR, WARMUP_COSINE };
     void set_schedule(Schedule s, int warmup_steps = 0, int total_steps = 0);
 
 private:
     float lr_, beta1_, beta2_, eps_, weight_decay_;
     int t_ = 0;
-    Schedule schedule_ = CONSTANT;
+    Schedule schedule_ = Schedule::CONSTANT;
     int warmup_steps_ = 0;
     int total_steps_ = 0;
     float current_lr_ = 0;

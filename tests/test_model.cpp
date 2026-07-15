@@ -42,8 +42,10 @@ int main() {
     unsigned int seed = 42;
     for (int64_t i = 0; i < B * S; i++) {
         seed = seed * 1103515245u + 12345u;
-        ((int*)input_ids.data())[i] = (int)((seed >> 16) % cfg.vocab_size);
-        ((int*)positions.data())[i] = (int)(i % S);
+        float tid = static_cast<float>((int)((seed >> 16) % cfg.vocab_size));
+        float pid = static_cast<float>((int)(i % S));
+        std::memcpy(input_ids.data<float>() + i, &tid, sizeof(float));
+        std::memcpy(positions.data<float>() + i, &pid, sizeof(float));
     }
 
     // Run forward pass
@@ -91,8 +93,11 @@ int main() {
 
         oil::Tensor in2(oil::Shape{1, 2}, oil::DType::F32);
         oil::Tensor pos2(oil::Shape{1, 2}, oil::DType::F32);
-        ((int*)in2.data())[0] = 0; ((int*)in2.data())[1] = 1;
-        ((int*)pos2.data())[0] = 0; ((int*)pos2.data())[1] = 1;
+        float v0 = 0.0f, v1 = 1.0f;
+        std::memcpy(in2.data<float>(), &v0, sizeof(float));
+        std::memcpy(in2.data<float>() + 1, &v1, sizeof(float));
+        std::memcpy(pos2.data<float>(), &v0, sizeof(float));
+        std::memcpy(pos2.data<float>() + 1, &v1, sizeof(float));
 
         oil::Tensor out2 = model2.forward(in2, pos2);
         assert(out2.shape().dims[2] == 50);
@@ -105,9 +110,10 @@ int main() {
         oil::Embedding emb(100, 32);
         assert(emb.param_count() == 100 * 32);
         oil::Tensor ids(oil::Shape{3}, oil::DType::F32);
-        ((int*)ids.data())[0] = 0;
-        ((int*)ids.data())[1] = 5;
-        ((int*)ids.data())[2] = 10;
+        float id0 = 0.0f, id5 = 5.0f, id10 = 10.0f;
+        std::memcpy(ids.data<float>(), &id0, sizeof(float));
+        std::memcpy(ids.data<float>() + 1, &id5, sizeof(float));
+        std::memcpy(ids.data<float>() + 2, &id10, sizeof(float));
         auto e = emb.forward(ids);
         assert(e.shape().rank == 2);
         assert(e.shape().dims[0] == 3);

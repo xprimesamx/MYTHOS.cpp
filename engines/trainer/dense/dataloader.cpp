@@ -77,6 +77,7 @@ void DataLoader::shuffle() {
     std::copy(data_.begin() + num_chunks * chunk, data_.end(),
               shuffled.begin() + num_chunks * chunk);
     data_ = std::move(shuffled);
+    pos_ = 0;
 }
 
 void DataLoader::reset() {

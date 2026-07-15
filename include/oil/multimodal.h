@@ -2,6 +2,7 @@
 #include "oil/tensor.h"
 #include "oil/model.h"
 #include "oil/trainer.h"
+#include "oil/tokenizer.h"
 #include <string>
 #include <vector>
 
@@ -123,13 +124,16 @@ private:
 class MultiModalTokenizer {
 public:
     MultiModalTokenizer();
+    explicit MultiModalTokenizer(BPETokenizer* bpe);
     std::vector<int> encode(const std::string& text);
     std::string decode(const std::vector<int>& tokens);
     std::vector<int> encode_image(const Tensor& image);
     std::vector<int> encode_audio(const Tensor& audio);
-    int vocab_size() const { return 32000; }
+    int vocab_size() const { return bpe_ ? bpe_->vocab_size() : 32000; }
     int image_token_id() const { return 30000; }
     int audio_token_id() const { return 31000; }
+private:
+    BPETokenizer* bpe_ = nullptr;
 };
 
 // H14: Modality encoder

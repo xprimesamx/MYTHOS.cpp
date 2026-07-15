@@ -5,6 +5,7 @@
 
 #include <iostream>
 #include <string>
+#include <filesystem>
 
 int main(int argc, char** argv) {
     if (argc < 2) {
@@ -23,6 +24,24 @@ int main(int argc, char** argv) {
     }
 
     oil::BPETokenizer tokenizer;
+    std::string vocab_path = model_path;
+    size_t dot = vocab_path.rfind('.');
+    if (dot != std::string::npos)
+        vocab_path = vocab_path.substr(0, dot);
+    vocab_path += ".vocab";
+
+    try {
+        if (std::filesystem::exists(vocab_path)) {
+            tokenizer.load(vocab_path);
+        } else {
+            std::cerr << "Warning: vocab file not found at " << vocab_path
+                      << ", using empty tokenizer" << std::endl;
+        }
+    } catch (const std::exception& e) {
+        std::cerr << "Error loading tokenizer: " << e.what() << std::endl;
+        return 1;
+    }
+
     oil::Generator gen(&model, &tokenizer);
 
     oil::SamplerConfig cfg;

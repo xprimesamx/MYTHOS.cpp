@@ -65,7 +65,7 @@ void DenseTrainer::compile(const TrainConfig& cfg) {
     }
 
     int total_steps_est = cfg.num_epochs * 100000;
-    optimizer_.set_schedule(AdamW::WARMUP_COSINE, cfg.warmup_steps, total_steps_est);
+    optimizer_.set_schedule(AdamW::Schedule::WARMUP_COSINE, cfg.warmup_steps, total_steps_est);
 
     metrics_ = TrainMetrics{};
     step_ = 0;
@@ -73,6 +73,10 @@ void DenseTrainer::compile(const TrainConfig& cfg) {
 
 float DenseTrainer::train_step(const Tensor& input_ids, const Tensor& labels) {
     zero_grad();
+    AutogradEngine::instance().clear();
+    const bool prev_ag = AutogradEngine::enabled();
+    AutogradEngine::set_enabled(true);
+
     auto cfg = model_->config;
     int64_t B = input_ids.dim(0);
     int64_t T = input_ids.dim(1);
@@ -88,7 +92,8 @@ float DenseTrainer::train_step(const Tensor& input_ids, const Tensor& labels) {
     Tensor logits_flat = logits.reshape({BT, cfg.vocab_size});
     Tensor labels_flat = labels.reshape({BT});
 
-    Tensor loss_tensor = cross_entropy_loss(logits_flat, labels_flat);
+    // Use autograd-aware CE so the graph reaches parameters
+    Tensor loss_tensor = AutogradEngine::cross_entropy_op(logits_flat, labels_flat);
     float loss_val = loss_tensor.data<float>()[0];
 
     AutogradEngine::instance().backward(loss_tensor);
@@ -96,6 +101,7 @@ float DenseTrainer::train_step(const Tensor& input_ids, const Tensor& labels) {
     clip_gradients(config_.grad_clip);
 
     optimizer_.step();
+    AutogradEngine::set_enabled(prev_ag);
 
     metrics_.loss = loss_val;
     metrics_.perplexity = std::exp(loss_val);
@@ -145,7 +151,7 @@ void DenseTrainer::clip_gradients(float max_norm) {
 
 void DenseTrainer::fit(DataLoader& loader) {
     int total_steps = config_.num_epochs * (int)loader.num_batches();
-    optimizer_.set_schedule(AdamW::WARMUP_COSINE, config_.warmup_steps, total_steps);
+    optimizer_.set_schedule(AdamW::Schedule::WARMUP_COSINE, config_.warmup_steps, total_steps);
 
     auto start_time = std::chrono::steady_clock::now();
     int64_t total_tokens = 0;
