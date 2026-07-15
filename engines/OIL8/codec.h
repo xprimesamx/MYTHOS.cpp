@@ -17,6 +17,7 @@ struct CodecConfig {
 
 struct EncodedBlock {
     uint32_t block_id;
+    std::string name;
     CodebookOIL8 codebook;
     std::vector<uint8_t> indices;
     uint32_t num_weights;

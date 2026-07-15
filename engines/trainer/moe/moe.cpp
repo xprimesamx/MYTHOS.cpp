@@ -113,7 +113,6 @@ RouterOutput MoERouter::forward(const Tensor& x, const Tensor& modality_hints) {
     }
 
     // 4. Load balance calculation
-    float* g_ptr = probs.data<float>();
     std::vector<double> f_i(E, 0.0);
     std::vector<double> P_i(E, 0.0);
     for (int64_t t = 0; t < T; ++t) {
@@ -330,8 +329,8 @@ Tensor MoMBlock::forward(const Tensor& x, const Tensor& positions,
     RouterOutput rout = router.forward(moe_normed, modality_hints);
     Tensor moe_out = moe_ffn.forward(moe_normed, rout);
 
-    // Cross-modal attention if multiple modalities present
-    Tensor cross_out = cross_attn.forward(moe_out, moe_out);
+    // Cross-modal attention between pre-MoE and post-MoE features
+    Tensor cross_out = cross_attn.forward(moe_normed, moe_out);
 
     Tensor result({residual.shape()});
     math::add(residual, moe_out, result);

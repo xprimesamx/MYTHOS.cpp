@@ -37,6 +37,26 @@ docs/
     ├── basic_inference.md
     ├── training_guide.md
     └── quantization_guide.md
+
+wiki/                          # Per-file documentation (repo-wiki style)
+├── Home.md                    # Wiki home page
+├── Architecture.md            # Architecture deep-dive
+├── Build-Guide.md             # Build instructions
+├── Usage-Guide.md             # Usage with examples
+├── Api-Reference.md           # Full API reference
+├── OIL-Format.md              # OIL binary format spec
+├── Training.md                # Training guide
+├── Inference.md               # Inference guide
+├── Research.md                # Research foundation
+├── Contributing.md            # Contribution guide
+├── Modules.md                 # Module index
+├── _Sidebar.md                # Wiki navigation sidebar
+└── files/                     # Per-file detailed documentation (91 files)
+    ├── _index.md              # File docs index
+    ├── types.h.md, tensor.h.md, model.h.md, ...
+    ├── tensor.cpp.md, math.cpp.md, transformer.cpp.md, ...
+    ├── engine-inference.cpp.md, engine-oil8-quantize.cpp.md, ...
+    └── tool-convert.cpp.md, test-tensor.cpp.md, ...
 ```
 
 ---
@@ -60,6 +80,19 @@ If you're new to MYTHOS.cpp, start here:
 | [BUILD.md](BUILD.md) | Step-by-step build instructions for all platforms | Everyone |
 | [USAGE.md](USAGE.md) | How to use MYTHOS.cpp for inference and training | Users |
 | [RESEARCH.md](RESEARCH.md) | Research papers and algorithms that inspired the design | Researchers |
+
+---
+
+## 📄 Per-File Documentation
+
+For **detailed per-file documentation** covering every header, source, engine, tool, and test file in the codebase, see the **[wiki/files/](../wiki/files/_index.md)** directory. Each file has its own markdown document explaining:
+
+- **Purpose & responsibilities** — What the file does and why it exists
+- **Key types & functions** — Important APIs defined in the file
+- **Implementation details** — How the code works internally
+- **Dependencies** — What other files/modules it depends on
+
+> Browse the full index at **[wiki/files/_index.md](../wiki/files/_index.md)** or start with the **[wiki/Home.md](../wiki/Home.md)** for a guided tour.
 
 ---
 

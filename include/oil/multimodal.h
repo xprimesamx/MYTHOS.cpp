@@ -86,9 +86,16 @@ private:
 // H9: Text-to-image — diffusion model
 class TextToImage {
 public:
+    struct UNetBlock {
+        Tensor conv_weight;
+        Tensor conv_bias;
+        Tensor bn_weight;
+        Tensor bn_bias;
+        int64_t in_channels, out_channels;
+    };
+
     TextToImage(int64_t latent_dim = 64, int64_t image_size = 256);
     Tensor generate(const std::string& prompt, int steps = 50);
-    struct UNetBlock;
 private:
     int64_t latent_dim_, image_size_;
     std::vector<UNetBlock> unet_;

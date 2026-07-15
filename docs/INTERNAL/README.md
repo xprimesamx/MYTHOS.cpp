@@ -465,6 +465,7 @@ See [Quantization Strategy](quantization_strategy.md) for details on:
 - **[Research Foundation](../RESEARCH.md)** - Research papers behind designs
 - **[Contributing Guide](../CONTRIBUTING.md)** - How to contribute
 - **[API Reference](../API_REFERENCE.md)** - Complete API documentation
+- **[Wiki Files](../wiki/files/_index.md)** - Per-file source documentation
 
 ---
 

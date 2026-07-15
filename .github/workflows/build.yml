@@ -1,0 +1,72 @@
+name: Build
+
+on:
+  push:
+    branches: [ main, master, develop ]
+  pull_request:
+    branches: [ main, master ]
+  workflow_dispatch:
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+        include:
+          - os: ubuntu-latest
+            cmake_args: -DCMAKE_BUILD_TYPE=Release
+            generator: Ninja
+            cxx: g++-12
+          - os: windows-latest
+            cmake_args: -DCMAKE_BUILD_TYPE=Release
+            generator: Ninja
+            cxx: cl
+          - os: macos-latest
+            cmake_args: -DCMAKE_BUILD_TYPE=Release
+            generator: Ninja
+            cxx: clang++
+
+    runs-on: ${{ matrix.os }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install dependencies (Ubuntu)
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y cmake ninja-build g++-12 || true
+          echo "CC=gcc-12" >> $GITHUB_ENV
+          echo "CXX=g++-12" >> $GITHUB_ENV
+
+      - name: Install dependencies (macOS)
+        if: runner.os == 'macOS'
+        run: |
+          brew install ninja || true
+
+      - name: Install dependencies (Windows)
+        if: runner.os == 'Windows'
+        run: |
+          choco install ninja -y || true
+
+      - name: Configure CMake
+        run: |
+          cmake -B build -G "${{ matrix.generator }}" ${{ matrix.cmake_args }} -DOIL_BUILD_TESTS=ON -DOIL_BUILD_BENCHMARKS=ON
+
+      - name: Build
+        run: cmake --build build --parallel
+
+      - name: Test
+        working-directory: ${{ github.workspace }}
+        run: ctest --test-dir build --output-on-failure --timeout 60
+
+      - name: Upload build artifacts
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: build-${{ runner.os }}
+          path: |
+            build/tools/
+            build/tests/
+            build/bench/

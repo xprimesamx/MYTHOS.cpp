@@ -125,15 +125,17 @@ target_include_directories(oil_moe PUBLIC include
 )
 target_link_libraries(oil_moe PUBLIC oil_model)
 
-# DirectX GPU compute library (cross-platform)
-add_library(oil_gpu
-  src/gpu_compute.cpp
-)
-target_include_directories(oil_gpu PUBLIC include)
-target_link_libraries(oil_gpu PUBLIC oil_core)
+# DirectX GPU compute library (Windows-only, needs D3D12)
 if(WIN32)
+  add_library(oil_gpu src/gpu_compute.cpp)
+  target_include_directories(oil_gpu PUBLIC include)
+  target_link_libraries(oil_gpu PUBLIC oil_core)
   target_link_libraries(oil_gpu PUBLIC d3d12 dxgi d3dcompiler)
   target_compile_definitions(oil_gpu PRIVATE OIL_USE_DIRECTX)
+  target_sources(oil_gpu PRIVATE src/gpu_extras.cpp)
+else()
+  add_library(oil_gpu INTERFACE)
+  target_include_directories(oil_gpu INTERFACE include)
 endif()
 
 # Hardware backend abstraction
@@ -141,7 +143,11 @@ add_library(oil_backend
   src/backend.cpp
 )
 target_include_directories(oil_backend PUBLIC include)
-target_link_libraries(oil_backend PUBLIC oil_math oil_gpu)
+if(WIN32)
+  target_link_libraries(oil_backend PUBLIC oil_math oil_gpu)
+else()
+  target_link_libraries(oil_backend PUBLIC oil_math)
+endif()
 
 # All MoE variants
 add_library(oil_moe_variants
@@ -158,9 +164,6 @@ add_library(oil_inference_opt
 )
 target_include_directories(oil_inference_opt PUBLIC include)
 target_link_libraries(oil_inference_opt PUBLIC oil_model oil_inference)
-
-# Cat E: GPU extras (Vulkan, Metal, IGPU, Multi-GPU, auto-tune, fallback)
-target_sources(oil_gpu PRIVATE src/gpu_extras.cpp)
 
 # Cat F: MoE enhancement
 add_library(oil_moe_enhance
@@ -182,13 +185,14 @@ add_library(oil_multimodal
 )
 target_include_directories(oil_multimodal PUBLIC include)
 target_link_libraries(oil_multimodal PUBLIC oil_model)
+target_link_libraries(oil_multimodal PUBLIC oil_tokenizer oil_trainer)
 
 # Cat I: Production (HTTP server, logging, config, C API, plugins)
 add_library(oil_production
   src/production.cpp
 )
 target_include_directories(oil_production PUBLIC include)
-target_link_libraries(oil_production PUBLIC oil_model oil_inference)
+target_link_libraries(oil_production PUBLIC oil_model oil_inference oil_tokenizer)
 
 # CUDA kernels (optional)
 find_package(CUDAToolkit QUIET)
@@ -196,7 +200,9 @@ if(CUDAToolkit_FOUND)
   add_definitions(-DOIL_HAS_CUDA)
   enable_language(CUDA)
   cuda_add_library(oil_cuda_kernels src/kernels/cuda_kernels.cu)
-  target_link_libraries(oil_gpu PUBLIC oil_cuda_kernels CUDA::cublas)
+  if(WIN32)
+    target_link_libraries(oil_gpu PUBLIC oil_cuda_kernels CUDA::cublas)
+  endif()
   target_include_directories(oil_cuda_kernels PUBLIC include)
   message(STATUS "CUDA found: ${CUDAToolkit_VERSION}")
 endif()
@@ -238,15 +244,25 @@ if(OIL_BUILD_TESTS)
   add_oil_test(test_tokenizer tests/test_tokenizer.cpp oil_tokenizer)
   add_oil_test(test_trainer  tests/test_trainer.cpp  oil_trainer oil_inference oil_tokenizer)
   add_oil_test(test_debug    tests/test_debug.cpp    oil_model)
-  add_oil_test(test_all      tests/test_all.cpp      oil_moe_variants oil_backend oil_gpu)
+  add_oil_test(test_all      tests/test_all.cpp      oil_moe_variants oil_backend)
   add_oil_test(test_training tests/test_training.cpp oil_trainer oil_model oil_engine oil_math oil_core)
-  # test_gpu needs explicit target definition due to CMake generator limitations
-  add_executable(test_gpu tests/test_gpu.cpp)
-  target_include_directories(test_gpu PRIVATE include)
-  target_link_libraries(test_gpu PRIVATE oil_math)
-  target_link_libraries(test_gpu PRIVATE oil_gpu)
-  target_link_libraries(test_gpu PRIVATE oil_backend)
-  add_test(NAME test_gpu COMMAND test_gpu)
+  if(WIN32)
+    target_link_libraries(test_all PRIVATE oil_gpu)
+    # test_gpu needs explicit target definition due to CMake generator limitations
+    add_executable(test_gpu tests/test_gpu.cpp)
+    target_include_directories(test_gpu PRIVATE include)
+    target_link_libraries(test_gpu PRIVATE oil_math)
+    target_link_libraries(test_gpu PRIVATE oil_gpu)
+    target_link_libraries(test_gpu PRIVATE oil_backend)
+    add_test(NAME test_gpu COMMAND test_gpu)
+  endif()
+
+  # New test executables
+  add_oil_test(test_inference_opt tests/test_inference_opt.cpp oil_inference_opt oil_model oil_inference)
+  add_oil_test(test_asi          tests/test_asi.cpp          oil_asi oil_trainer oil_model oil_tokenizer)
+  add_oil_test(test_multimodal   tests/test_multimodal.cpp   oil_multimodal oil_model oil_tokenizer oil_trainer oil_inference)
+  add_oil_test(test_production   tests/test_production.cpp   oil_production oil_model oil_tokenizer)
+  add_oil_test(test_gradient_check tests/test_gradient_check.cpp oil_trainer oil_model oil_math oil_core)
 endif()
 
 if(OIL_BUILD_BENCHMARKS)

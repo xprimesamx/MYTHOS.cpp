@@ -4,6 +4,8 @@
 
 ---
 
+> **Per-file documentation:** For detailed implementation notes, see [tensor.h.md](../../wiki/files/tensor.h.md) and [tensor.cpp.md](../../wiki/files/tensor.cpp.md).
+
 ## 📚 Overview
 
 The Tensor module provides the fundamental data structure for MYTHOS.cpp. It implements a multi-dimensional array that supports:

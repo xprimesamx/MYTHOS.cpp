@@ -421,6 +421,8 @@ Contact us if you're interested in collaboration!
 
 ## 📚 Additional Resources
 
+- **[Wiki Research Page](../wiki/Research.md)** — Research documentation in wiki format
+- **[Wiki OIL Format Spec](../wiki/OIL-Format.md)** — Detailed OIL binary format documentation
 - [Papers With Code - Quantization](https://paperswithcode.com/task/quantization)
 - [Papers With Code - Efficient Transformers](https://paperswithcode.com/task/efficient-transformers)
 - [HuggingFace Research](https://huggingface.co/research)

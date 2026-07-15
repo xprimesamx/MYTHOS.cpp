@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <random>
 #include <chrono>
+#include <filesystem>
 
 namespace oil {
 namespace dense {
@@ -11,9 +12,11 @@ DataLoader::DataLoader(Tokenizer* tokenizer, const std::string& data_path,
                        int64_t batch_size, int64_t seq_length)
     : tokenizer_(tokenizer), batch_size_(batch_size), seq_length_(seq_length)
 {
-    std::ifstream file(data_path, std::ios::binary | std::ios::ate);
+    std::filesystem::path path(data_path);
+    path = std::filesystem::absolute(path);
+    std::ifstream file(path, std::ios::binary | std::ios::ate);
     if (!file)
-        throw Error("DataLoader: cannot open " + data_path);
+        throw Error("DataLoader: cannot open " + path.string());
     size_t size = file.tellg();
     file.seekg(0);
     std::string text(size, '\0');

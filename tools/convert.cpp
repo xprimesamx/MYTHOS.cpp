@@ -1,6 +1,8 @@
 #include "oil/oil_format.h"
 #include "oil/tensor.h"
 #include "oil/types.h"
+#include "oil/format_planner.h"
+#include "oil/codebook.h"
 
 #include <iostream>
 #include <string>
@@ -9,11 +11,14 @@
 #include <vector>
 #include <cstdint>
 #include <map>
+#include <algorithm>
+#include <cmath>
 
 struct ConvertArgs {
     std::string input_path;
     std::string output_path;
     std::string input_fmt = "rawfp32";
+    float target_bpw = 0.0f; // 0 = no compression (FP32 passthrough)
     bool verbose = false;
 };
 
@@ -26,16 +31,352 @@ static ConvertArgs parse_args(int argc, char** argv) {
             args.output_path = argv[++i];
         else if (strcmp(argv[i], "--format") == 0 && i + 1 < argc)
             args.input_fmt = argv[++i];
+        else if (strcmp(argv[i], "--bpw") == 0 && i + 1 < argc)
+            args.target_bpw = (float)std::atof(argv[++i]);
         else if (strcmp(argv[i], "--verbose") == 0)
             args.verbose = true;
         else if (strcmp(argv[i], "-h") == 0 || strcmp(argv[i], "--help") == 0) {
             std::cout << "Usage: oil_convert --input <file> --output <model.oil> [options]\n";
             std::cout << "  --format fmt   Input format: rawfp32 (default), gguf\n";
+            std::cout << "  --bpw N        Target bits-per-weight for FormatPlanner (0=no compression)\n";
             std::cout << "  --verbose      Verbose output\n";
+            std::cout << "\nFormats: 1.0(binary) 1.58(ternary) 4.0(oil4) 8.0(oil8) 16.0(fp16) 32.0(fp32)\n";
             exit(0);
         }
     }
     return args;
+}
+
+// GGUF v1/v2/v3 header parsing and Q4_0/Q4_1/Q8_0/F16 dequantization
+struct GGUFTensorInfo {
+    std::string name;
+    uint32_t n_dims;
+    uint64_t ne[4];
+    uint32_t ggml_type;
+    uint64_t offset;
+};
+
+static const uint32_t GGML_TYPE_Q4_0 = 2;
+static const uint32_t GGML_TYPE_Q4_1 = 3;
+static const uint32_t GGML_TYPE_Q8_0 = 8;
+static const uint32_t GGML_TYPE_F16  = 1;
+static const uint32_t GGML_TYPE_F32  = 0;
+
+static uint64_t read_le_u64(std::istream& is) {
+    uint64_t v = 0;
+    is.read(reinterpret_cast<char*>(&v), 8);
+    return v;
+}
+static uint32_t read_le_u32(std::istream& is) {
+    uint32_t v = 0;
+    is.read(reinterpret_cast<char*>(&v), 4);
+    return v;
+}
+static uint16_t read_le_u16(std::istream& is) {
+    uint16_t v = 0;
+    is.read(reinterpret_cast<char*>(&v), 2);
+    return v;
+}
+static uint8_t read_u8(std::istream& is) {
+    uint8_t v = 0;
+    is.read(reinterpret_cast<char*>(&v), 1);
+    return v;
+}
+static std::string read_string(std::istream& is) {
+    uint64_t len = read_le_u64(is);
+    std::string s(len, '\0');
+    if (len > 0) is.read(&s[0], (std::streamsize)len);
+    return s;
+}
+
+// Dequantization helpers
+static void dequantize_q4_0(const uint8_t* block, float* out, int offset) {
+    // Q4_0 block: 1x fp16 scale (2 bytes) + 32x 4-bit values (16 bytes) = 18 bytes
+    int16_t scale_half = *(const int16_t*)(block);
+    float scale = (float)scale_half;
+    // Convert from IEEE 754 half to float manually
+    if (scale_half) {
+        int sign = (scale_half >> 15) & 1;
+        int exp  = (scale_half >> 10) & 0x1F;
+        int mant = scale_half & 0x3FF;
+        if (exp == 0) {
+            // subnormal
+            scale = (float)(mant) / 16384.0f * 2.0f;
+            if (sign) scale = -scale;
+        } else if (exp == 31) {
+            scale = mant ? NAN : INFINITY;
+        } else {
+            scale = (float)((mant | 0x400) << 13) / 8388608.0f * (1 << (exp - 15));
+            if (sign) scale = -scale;
+        }
+    }
+    for (int i = 0; i < 32; i++) {
+        uint8_t q = block[2 + i / 2];
+        if (i % 2 == 0) q &= 0x0F;
+        else            q >>= 4;
+        out[offset + i] = ((float)q - 8.0f) * scale;
+    }
+}
+
+static void dequantize_q4_1(const uint8_t* block, float* out, int offset) {
+    // Q4_1 block: 1x fp16 scale (2 bytes) + 1x fp16 min (2 bytes) + 32x 4-bit values (16 bytes) = 20 bytes
+    int16_t scale_half = *(const int16_t*)(block);
+    int16_t min_half   = *(const int16_t*)(block + 2);
+    auto half_to_float = [](int16_t h) -> float {
+        int sign = (h >> 15) & 1;
+        int exp  = (h >> 10) & 0x1F;
+        int mant = h & 0x3FF;
+        if (exp == 0) {
+            float v = (float)(mant) / 16384.0f * 2.0f;
+            return sign ? -v : v;
+        } else if (exp == 31) {
+            return mant ? NAN : INFINITY;
+        } else {
+            float v = (float)((mant | 0x400) << 13) / 8388608.0f * (1 << (exp - 15));
+            return sign ? -v : v;
+        }
+    };
+    float scale = half_to_float(scale_half);
+    float min   = half_to_float(min_half);
+    for (int i = 0; i < 32; i++) {
+        uint8_t q = block[4 + i / 2];
+        if (i % 2 == 0) q &= 0x0F;
+        else            q >>= 4;
+        out[offset + i] = (float)q * scale + min;
+    }
+}
+
+static void dequantize_q8_0(const uint8_t* block, float* out, int offset) {
+    // Q8_0 block: 1x fp16 scale (2 bytes) + 32x int8 values (32 bytes) = 34 bytes
+    int16_t scale_half = *(const int16_t*)(block);
+    auto half_to_float = [](int16_t h) -> float {
+        int sign = (h >> 15) & 1;
+        int exp  = (h >> 10) & 0x1F;
+        int mant = h & 0x3FF;
+        if (exp == 0) {
+            float v = (float)(mant) / 16384.0f * 2.0f;
+            return sign ? -v : v;
+        } else if (exp == 31) {
+            return mant ? NAN : INFINITY;
+        } else {
+            float v = (float)((mant | 0x400) << 13) / 8388608.0f * (1 << (exp - 15));
+            return sign ? -v : v;
+        }
+    };
+    float scale = half_to_float(scale_half);
+    for (int i = 0; i < 32; i++) {
+        int8_t q = (int8_t)block[2 + i];
+        out[offset + i] = (float)q * scale;
+    }
+}
+
+// Read GGUF model from file and convert to FP32
+static bool read_gguf(const std::string& path, std::vector<float>& all_weights,
+                      std::vector<int64_t>& all_shapes, std::vector<std::string>& all_names,
+                      bool verbose) {
+    std::ifstream is(path, std::ios::binary);
+    if (!is) { std::cerr << "Cannot open " << path << "\n"; return false; }
+
+    // Read magic: "GGUF" v1/v2/v3
+    char magic[4];
+    is.read(magic, 4);
+    if (memcmp(magic, "GGUF", 4) != 0) {
+        std::cerr << "Not a GGUF file (magic: " << magic[0] << magic[1] << magic[2] << magic[3] << ")\n";
+        return false;
+    }
+    uint32_t version = read_le_u32(is);
+    if (version < 1 || version > 3) {
+        std::cerr << "Unsupported GGUF version: " << version << "\n";
+        return false;
+    }
+    uint64_t n_tensors   = read_le_u64(is);
+    uint64_t n_kv        = read_le_u64(is);
+    if (verbose)
+        std::cout << "GGUF v" << version << " tensors=" << n_tensors << " metadata=" << n_kv << "\n";
+
+    // Skip metadata key-value pairs
+    for (uint64_t i = 0; i < n_kv; i++) {
+        std::string key = read_string(is);
+        uint32_t val_type = read_le_u32(is);
+        switch (val_type) {
+            case 0: is.ignore(1); break;                             // uint8
+            case 1: is.ignore(8); break;                             // int8
+            case 2: is.ignore(4); break;                             // uint16
+            case 3: is.ignore(2); break;                             // int16
+            case 4: is.ignore(8); break;                             // uint32
+            case 5: is.ignore(4); break;                             // int32
+            case 6: is.ignore(8); break;                             // float32
+            case 7: is.ignore(4); break;                             // bool
+            case 8: read_string(is); break;                          // string
+            case 9: {                                                // array
+                uint32_t atype = read_le_u32(is);
+                uint64_t alen  = read_le_u64(is);
+                for (uint64_t j = 0; j < alen; j++) {
+                    switch (atype) {
+                        case 8: read_string(is); break;
+                        default: is.ignore(4); break;
+                    }
+                }
+                break;
+            }
+            case 10: is.ignore(8); break;                            // uint64
+            case 11: is.ignore(8); break;                            // int64
+            case 12: is.ignore(8); break;                            // float64
+            default: is.ignore(4); break;
+        }
+    }
+
+    // Read tensor info
+    struct GGUFTensorInfo info;
+    std::vector<GGUFTensorInfo> tensor_infos;
+    tensor_infos.reserve(n_tensors);
+    for (uint64_t i = 0; i < n_tensors; i++) {
+        info.name = read_string(is);
+        info.n_dims = read_le_u32(is);
+        info.ggml_type = read_le_u32(is);
+        info.offset = read_le_u64(is);
+        // v3 adds file offset alignment
+        if (version >= 3)
+            info.offset = read_le_u64(is);
+        for (uint32_t d = 0; d < info.n_dims; d++)
+            info.ne[d] = read_le_u64(is);
+        for (uint32_t d = info.n_dims; d < 4; d++)
+            info.ne[d] = 1;
+        tensor_infos.push_back(info);
+    }
+
+    // Read and dequantize each tensor
+    for (auto& ti : tensor_infos) {
+        int64_t num_el = 1;
+        for (uint32_t d = 0; d < ti.n_dims; d++)
+            num_el *= (int64_t)ti.ne[d];
+
+        all_names.push_back(ti.name);
+        all_shapes.push_back(num_el);
+        size_t start = all_weights.size();
+        all_weights.resize(start + num_el);
+
+        is.seekg(ti.offset, std::ios::beg);
+        if (verbose)
+            std::cout << "  tensor " << ti.name << " type=" << ti.ggml_type << " n_el=" << num_el << " offset=" << ti.offset << "\n";
+
+        if (ti.ggml_type == GGML_TYPE_F32) {
+            // Direct FP32 read
+            is.read(reinterpret_cast<char*>(&all_weights[start]), (std::streamsize)(num_el * 4));
+        } else if (ti.ggml_type == GGML_TYPE_F16) {
+            for (int64_t j = 0; j < num_el; j++) {
+                int16_t h = 0;
+                is.read(reinterpret_cast<char*>(&h), 2);
+                int sign = (h >> 15) & 1;
+                int exp  = (h >> 10) & 0x1F;
+                int mant = h & 0x3FF;
+                float f;
+                if (exp == 0)
+                    f = (float)(mant) / 16384.0f * 2.0f;
+                else if (exp == 31)
+                    f = mant ? NAN : INFINITY;
+                else
+                    f = (float)((mant | 0x400) << 13) / 8388608.0f * (1 << (exp - 15));
+                all_weights[start + j] = sign ? -f : f;
+            }
+        } else if (ti.ggml_type == GGML_TYPE_Q4_0) {
+            int64_t n_blocks = (num_el + 31) / 32;
+            for (int64_t b = 0; b < n_blocks; b++) {
+                uint8_t block[18];
+                is.read(reinterpret_cast<char*>(block), 18);
+                dequantize_q4_0(block, all_weights.data(), (int)(start + b * 32));
+            }
+        } else if (ti.ggml_type == GGML_TYPE_Q4_1) {
+            int64_t n_blocks = (num_el + 31) / 32;
+            for (int64_t b = 0; b < n_blocks; b++) {
+                uint8_t block[20];
+                is.read(reinterpret_cast<char*>(block), 20);
+                dequantize_q4_1(block, all_weights.data(), (int)(start + b * 32));
+            }
+        } else if (ti.ggml_type == GGML_TYPE_Q8_0) {
+            int64_t n_blocks = (num_el + 31) / 32;
+            for (int64_t b = 0; b < n_blocks; b++) {
+                uint8_t block[34];
+                is.read(reinterpret_cast<char*>(block), 34);
+                dequantize_q8_0(block, all_weights.data(), (int)(start + b * 32));
+            }
+        } else {
+            std::cerr << "Unsupported GGML type " << ti.ggml_type << " for tensor " << ti.name << "\n";
+            return false;
+        }
+    }
+    return true;
+}
+
+// Apply FormatPlanner to compress weights to target BPW
+static bool apply_format_plan(const std::vector<float>& f32_data, size_t num_weights,
+                               float target_bpw, oil::FormatPlan& plan,
+                               std::vector<uint8_t>& compressed_indices,
+                               std::vector<uint8_t>& codebook_data) {
+    if (target_bpw <= 0.0f) return false;
+    if (num_weights == 0) return false;
+
+    oil::FormatPlanner planner(target_bpw);
+    int64_t num_blocks = (int64_t)((num_weights + 255) / 256);
+    plan = planner.plan_for_model(num_blocks * 256);
+
+    oil::Format actual_format = oil::Format::FP32;
+    for (auto& blk : plan.blocks) {
+        actual_format = blk.assigned_format;
+        break;
+    }
+
+    if (actual_format == oil::Format::TERNARY) {
+        // Ternary: 2 bits per weight, pack 4 per byte
+        size_t packed_size = (num_weights + 3) / 4;
+        compressed_indices.resize(packed_size, 0);
+        codebook_data.resize(3 * 4); // {-1, 0, +1} stored as FP32
+        for (int i = 0; i < 3; i++) {
+            float val = (float)(i - 1);
+            memcpy(&codebook_data[i * 4], &val, 4);
+        }
+        for (size_t i = 0; i < num_weights; i++) {
+            int8_t q = (f32_data[i] > 0.5f) ? 1 : ((f32_data[i] < -0.5f) ? -1 : 0);
+            uint8_t packed = (uint8_t)(q + 1); // map -1->0, 0->1, 1->2
+            compressed_indices[i / 4] |= (packed << ((i % 4) * 2));
+        }
+    } else if (actual_format == oil::Format::OIL8) {
+        // OIL8: 8-bit codebook quantized
+        oil::CodebookOIL8 cb;
+        cb.train(f32_data.data(), (int)num_weights);
+        compressed_indices.resize(num_weights);
+        codebook_data.resize(cb.serialized_size());
+        cb.serialize(codebook_data.data());
+        for (size_t i = 0; i < num_weights; i++) {
+            compressed_indices[i] = cb.quantize(f32_data[i]);
+        }
+    } else if (actual_format == oil::Format::OIL4) {
+        // OIL4: 4-bit codebook quantized, pack 2 per byte
+        oil::CodebookOIL4 cb;
+        cb.train(f32_data.data(), (int)num_weights);
+        compressed_indices.resize((num_weights + 1) / 2);
+        codebook_data.resize(cb.serialized_size());
+        cb.serialize(codebook_data.data());
+        for (size_t i = 0; i < num_weights; i++) {
+            uint8_t idx = cb.quantize(f32_data[i]);
+            if (i % 2 == 0)
+                compressed_indices[i / 2] = idx & 0x0F;
+            else
+                compressed_indices[i / 2] |= (idx << 4);
+        }
+    } else {
+        // Binary: 1 bit per weight, pack 8 per byte
+        compressed_indices.resize((num_weights + 7) / 8, 0);
+        codebook_data.resize(2 * 4); // {-1, +1} stored as FP32
+        float neg_one = -1.0f, pos_one = 1.0f;
+        memcpy(&codebook_data[0], &neg_one, 4);
+        memcpy(&codebook_data[4], &pos_one, 4);
+        for (size_t i = 0; i < num_weights; i++) {
+            if (f32_data[i] >= 0)
+                compressed_indices[i / 8] |= (1 << (i % 8));
+        }
+    }
+    return true;
 }
 
 static bool convert_raw_fp32(const std::string& in_path, const std::string& out_path) {
@@ -92,121 +433,14 @@ static bool convert_raw_fp32(const std::string& in_path, const std::string& out_
     return true;
 }
 
-// GGUF format constants
-enum GGMLType { GGML_TYPE_F32 = 0, GGML_TYPE_F16 = 1, GGML_TYPE_Q4_0 = 2, GGML_TYPE_Q4_1 = 3,
-    GGML_TYPE_Q5_0 = 6, GGML_TYPE_Q5_1 = 7, GGML_TYPE_Q8_0 = 8, GGML_TYPE_Q8_1 = 9 };
-
-struct GGUFTensorInfo {
-    std::string name;
-    std::vector<uint32_t> dims;
-    uint32_t type;
-    uint64_t offset;
-};
-
-static uint64_t ggml_type_size(uint32_t type) {
-    switch (type) {
-        case GGML_TYPE_F32: return 4;
-        case GGML_TYPE_F16: return 2;
-        case GGML_TYPE_Q4_0: return 18; // block_size=32, 16 bytes quant + 2 bytes scale
-        case GGML_TYPE_Q4_1: return 20; // block_size=32, 16 bytes quant + 4 bytes scales
-        case GGML_TYPE_Q5_0: return 22; // block_size=32, 16 bytes quant + 4 bytes scales + 2 bytes quants
-        case GGML_TYPE_Q5_1: return 24;
-        case GGML_TYPE_Q8_0: return 34; // block_size=32, 32 bytes quant + 2 bytes scale
-        default: return 4;
-    }
-}
-
-static uint32_t ggml_block_size(uint32_t type) {
-    switch (type) {
-        case GGML_TYPE_Q4_0: case GGML_TYPE_Q4_1:
-        case GGML_TYPE_Q5_0: case GGML_TYPE_Q5_1:
-        case GGML_TYPE_Q8_0: case GGML_TYPE_Q8_1:
-            return 32;
-        default: return 1;
-    }
-}
-
-static std::string read_gguf_string(std::ifstream& f) {
-    uint64_t len;
-    f.read((char*)&len, sizeof(len));
-    std::string s(len, '\0');
-    if (len > 0) f.read(&s[0], len);
-    return s;
-}
-
-static bool convert_gguf(const std::string& in_path, const std::string& out_path) {
-    std::ifstream in(in_path, std::ios::binary);
-    if (!in.is_open()) {
-        std::cerr << "Error: cannot open GGUF file: " << in_path << std::endl;
+// High-level GGUF conversion: reads via read_gguf(), optionally compresses with FormatPlanner, writes OIL
+static bool convert_gguf(const std::string& in_path, const std::string& out_path, float target_bpw) {
+    std::vector<float> all_weights;
+    std::vector<int64_t> all_shapes;
+    std::vector<std::string> all_names;
+    if (!read_gguf(in_path, all_weights, all_shapes, all_names, false))
         return false;
-    }
 
-    // Read GGUF header
-    uint32_t magic;
-    in.read((char*)&magic, sizeof(magic));
-    if (magic != 0x46554747 && magic != 0x47475546) {
-        std::cerr << "Error: not a valid GGUF file (magic: 0x" << std::hex << magic << std::dec << ")\n";
-        return false;
-    }
-
-    uint32_t version;
-    in.read((char*)&version, sizeof(version));
-    uint64_t tensor_count, metadata_kv_count;
-    in.read((char*)&tensor_count, sizeof(tensor_count));
-    in.read((char*)&metadata_kv_count, sizeof(metadata_kv_count));
-
-    if (version < 1 || version > 3) {
-        std::cerr << "Warning: unknown GGUF version " << version << ", attempting to read...\n";
-    }
-
-    std::cout << "GGUF v" << version << ": " << tensor_count << " tensors, "
-              << metadata_kv_count << " metadata entries\n";
-
-    // Skip metadata KV pairs
-    for (uint64_t i = 0; i < metadata_kv_count; i++) {
-        std::string key = read_gguf_string(in);
-        uint32_t type;
-        in.read((char*)&type, sizeof(type));
-        switch (type) {
-            case 0: { uint8_t v; in.read((char*)&v, sizeof(v)); break; }
-            case 1: { int8_t v; in.read((char*)&v, sizeof(v)); break; }
-            case 2: { uint16_t v; in.read((char*)&v, sizeof(v)); break; }
-            case 3: { int16_t v; in.read((char*)&v, sizeof(v)); break; }
-            case 4: { uint32_t v; in.read((char*)&v, sizeof(v)); break; }
-            case 5: { int32_t v; in.read((char*)&v, sizeof(v)); break; }
-            case 6: { float v; in.read((char*)&v, sizeof(v)); break; }
-            case 7: { uint64_t v; in.read((char*)&v, sizeof(v)); break; }
-            case 8: { int64_t v; in.read((char*)&v, sizeof(v)); break; }
-            case 9: { double v; in.read((char*)&v, sizeof(v)); break; }
-            case 10: { uint32_t n; in.read((char*)&n, sizeof(n)); for (uint32_t j = 0; j < n; j++) { bool b; in.read((char*)&b, sizeof(b)); } break; }
-            case 11: { std::string s = read_gguf_string(in); break; }
-            case 12: { uint32_t n; in.read((char*)&n, sizeof(n)); for (uint32_t j = 0; j < n; j++) in.ignore(1); break; }
-            default: break;
-        }
-    }
-
-    // Read tensor info entries
-    std::vector<GGUFTensorInfo> tensors;
-    for (uint64_t i = 0; i < tensor_count; i++) {
-        GGUFTensorInfo t;
-        t.name = read_gguf_string(in);
-        uint32_t n_dims;
-        in.read((char*)&n_dims, sizeof(n_dims));
-        t.dims.resize(n_dims);
-        for (uint32_t j = 0; j < n_dims; j++)
-            in.read((char*)&t.dims[j], sizeof(uint32_t));
-        in.read((char*)&t.type, sizeof(t.type));
-        in.read((char*)&t.offset, sizeof(t.offset));
-        tensors.push_back(t);
-    }
-
-    // Align to 32 bytes (standard GGUF alignment)
-    uint64_t data_start = (uint64_t)in.tellg();
-    uint64_t alignment = 32;
-    uint64_t aligned = (data_start + alignment - 1) / alignment * alignment;
-    in.seekg(aligned);
-
-    // Create OIL output
     oil::OILWriter writer(out_path);
     oil::OILHeader hdr;
     memcpy(hdr.magic, "OIL1", 4);
@@ -215,128 +449,96 @@ static bool convert_gguf(const std::string& in_path, const std::string& out_path
     hdr.config_size = 0;
     writer.write_header(hdr, nullptr);
 
-    // Build format table from tensor types
-    std::vector<oil::FormatBlockEntry> fmt_entries;
-    std::vector<oil::TensorEntry> t_entries;
-    std::vector<std::string> t_names;
-    std::map<uint32_t, uint8_t> format_map; // GGML type -> format block ID
-    uint8_t next_block_id = 0;
+    // Use FormatPlanner if BPW target given
+    oil::FormatPlan format_plan;
+    std::vector<uint8_t> compressed_indices;
+    std::vector<uint8_t> codebook_data;
+    bool use_compression = false;
 
-    // Quantized tensors will be converted to FP32
-    auto get_or_create_format = [&](uint32_t ggml_type, int64_t n_weights) -> uint8_t {
-        if (format_map.count(ggml_type)) return format_map[ggml_type];
-        uint8_t bid = next_block_id++;
-        oil::FormatBlockEntry fe;
-        fe.block_id = bid;
-        fe.format = (uint8_t)oil::Format::FP32;
-        fe.cb_bytes = 0;
-        fmt_entries.push_back(fe);
-        format_map[ggml_type] = bid;
-        return bid;
-    };
-
-    for (auto& t : tensors) {
-        int64_t n_weights = 1;
-        for (auto d : t.dims) n_weights *= (int64_t)d;
-        uint8_t bid = get_or_create_format(t.type, n_weights);
-
-        oil::TensorEntry te;
-        te.name_len = (uint32_t)t.name.size();
-        te.block_start = (uint32_t)t_entries.size(); // each tensor gets its own block
-        te.num_blocks = 1;
-        t_entries.push_back(te);
-        t_names.push_back(t.name);
+    if (target_bpw > 0.0f && !all_weights.empty()) {
+        use_compression = apply_format_plan(all_weights, all_weights.size(), target_bpw,
+                                            format_plan, compressed_indices, codebook_data);
     }
 
-    writer.write_format_table(fmt_entries);
-    writer.write_tensor_table(t_entries, t_names);
-
-    // Read and write each tensor
-    for (size_t i = 0; i < tensors.size(); i++) {
-        auto& t = tensors[i];
-        int64_t n_weights = 1;
-        for (auto d : t.dims) n_weights *= (int64_t)d;
-
-        // Seek to tensor data
-        in.seekg(aligned + t.offset);
-
-        // Read and dequantize to FP32
-        std::vector<float> f32_data(n_weights);
-        uint32_t block_sz = ggml_block_size(t.type);
-        uint64_t type_sz = ggml_type_size(t.type);
-        uint64_t n_blocks = (n_weights + block_sz - 1) / block_sz;
-
-        if (t.type == GGML_TYPE_F32) {
-            in.read((char*)f32_data.data(), n_weights * sizeof(float));
-        } else if (t.type == GGML_TYPE_F16) {
-            for (int64_t j = 0; j < n_weights; j++) {
-                uint16_t f16;
-                in.read((char*)&f16, sizeof(f16));
-                // FP16 to FP32 conversion
-                uint32_t sign = (uint32_t)(f16 >> 15);
-                uint32_t exp = (uint32_t)((f16 >> 10) & 0x1F);
-                uint32_t mant = (uint32_t)(f16 & 0x3FF);
-                uint32_t f32;
-                if (exp == 0) {
-                    f32 = (sign << 31) | (mant << 13);
-                } else if (exp == 31) {
-                    f32 = (sign << 31) | (0xFF << 23) | (mant << 13);
-                } else {
-                    f32 = (sign << 31) | ((exp + 112) << 23) | (mant << 13);
-                }
-                memcpy(&f32_data[j], &f32, sizeof(f32));
-            }
-        } else {
-            // Quantized format: dequantize Q4_0, Q4_1, Q5_0, Q5_1, Q8_0
-            std::vector<uint8_t> block_data(n_blocks * type_sz);
-            in.read((char*)block_data.data(), n_blocks * type_sz);
-
-            for (uint64_t b = 0; b < n_blocks; b++) {
-                int64_t base = (int64_t)b * block_sz;
-                int64_t remain = std::min((int64_t)block_sz, n_weights - base);
-                const uint8_t* src = block_data.data() + b * type_sz;
-
-                if (t.type == GGML_TYPE_Q4_0) {
-                    float scale;
-                    memcpy(&scale, src + 16, sizeof(float));
-                    for (int64_t j = 0; j < remain && j < 32; j++) {
-                        int8_t q = (src[j / 2] >> (j % 2 * 4)) & 0x0F;
-                        f32_data[base + j] = ((float)q - 8.0f) * scale;
-                    }
-                } else if (t.type == GGML_TYPE_Q4_1) {
-                    float scale, min;
-                    memcpy(&scale, src + 16, sizeof(float));
-                    memcpy(&min, src + 20, sizeof(float));
-                    for (int64_t j = 0; j < remain && j < 32; j++) {
-                        int8_t q = (src[j / 2] >> (j % 2 * 4)) & 0x0F;
-                        f32_data[base + j] = (float)q * scale + min;
-                    }
-                } else if (t.type == GGML_TYPE_Q8_0) {
-                    float scale;
-                    memcpy(&scale, src + 32, sizeof(float));
-                    for (int64_t j = 0; j < remain && j < 32; j++) {
-                        f32_data[base + j] = (float)((int8_t)src[j]) * scale;
-                    }
-                } else {
-                    // Fallback: copy raw bytes as float
-                    for (int64_t j = 0; j < remain; j++)
-                        f32_data[base + j] = 0.0f;
-                }
-            }
+    oil::Format actual_format = oil::Format::FP32;
+    uint32_t codebook_bytes = 0;
+    if (use_compression) {
+        for (auto& blk : format_plan.blocks) {
+            actual_format = blk.assigned_format;
+            break;
         }
+        codebook_bytes = (uint32_t)codebook_data.size();
+    }
 
-        // Write as OIL block
-        oil::BlockData block;
-        block.format = oil::Format::FP32;
-        block.num_weights = (uint32_t)f32_data.size();
-        size_t byte_size = f32_data.size() * sizeof(float);
-        block.indices.resize(byte_size);
-        memcpy(block.indices.data(), f32_data.data(), byte_size);
-        writer.write_block(block);
+    std::vector<oil::FormatBlockEntry> fmt_entries;
+    {
+        oil::FormatBlockEntry fe;
+        fe.block_id = 0;
+        fe.format = (uint8_t)actual_format;
+        fe.cb_bytes = codebook_bytes;
+        fmt_entries.push_back(fe);
+    }
+    writer.write_format_table(fmt_entries);
+
+    // If compression was applied, write all weights as a single block
+    if (use_compression) {
+        std::vector<oil::TensorEntry> t_entries;
+        std::vector<std::string> t_names;
+        size_t cursor = 0;
+        for (size_t i = 0; i < all_names.size(); i++) {
+            oil::TensorEntry te;
+            te.name_len = (uint32_t)all_names[i].size();
+            te.block_start = (uint32_t)i;
+            te.num_blocks = 1;
+            t_entries.push_back(te);
+            t_names.push_back(all_names[i]);
+        }
+        writer.write_tensor_table(t_entries, t_names);
+
+        for (size_t i = 0; i < all_names.size(); i++) {
+            oil::BlockData block;
+            block.format = actual_format;
+            block.num_weights = (uint32_t)all_shapes[i];
+            if (actual_format == oil::Format::TERNARY || actual_format == oil::Format::BINARY ||
+                actual_format == oil::Format::FP32) {
+                // Shared codebook for first block; subsequent blocks reuse it (zero-length indices)
+            }
+            block.indices = compressed_indices;
+            block.codebook = codebook_data;
+            writer.write_block(block);
+        }
+    } else {
+        // No compression: write FP32 data per tensor
+        std::vector<oil::TensorEntry> t_entries;
+        std::vector<std::string> t_names;
+        for (size_t i = 0; i < all_names.size(); i++) {
+            oil::TensorEntry te;
+            te.name_len = (uint32_t)all_names[i].size();
+            te.block_start = (uint32_t)i;
+            te.num_blocks = 1;
+            t_entries.push_back(te);
+            t_names.push_back(all_names[i]);
+        }
+        writer.write_tensor_table(t_entries, t_names);
+
+        size_t cursor = 0;
+        for (size_t i = 0; i < all_names.size(); i++) {
+            oil::BlockData block;
+            block.format = oil::Format::FP32;
+            block.num_weights = (uint32_t)all_shapes[i];
+            size_t byte_size = all_shapes[i] * sizeof(float);
+            block.indices.resize(byte_size);
+            memcpy(block.indices.data(), &all_weights[cursor], byte_size);
+            writer.write_block(block);
+            cursor += all_shapes[i];
+        }
     }
 
     writer.close();
-    std::cout << "Converted " << tensors.size() << " tensors to OIL: " << out_path << std::endl;
+    std::cout << "Converted " << all_names.size() << " tensors to OIL: " << out_path;
+    if (use_compression)
+        std::cout << " (compressed to " << target_bpw << " BPW using " << oil::format_name(actual_format) << ")";
+    std::cout << std::endl;
     return true;
 }
 
@@ -353,7 +555,7 @@ int main(int argc, char** argv) {
     if (args.input_fmt == "rawfp32") {
         ok = convert_raw_fp32(args.input_path, args.output_path);
     } else if (args.input_fmt == "gguf") {
-        ok = convert_gguf(args.input_path, args.output_path);
+        ok = convert_gguf(args.input_path, args.output_path, args.target_bpw);
     } else {
         std::cerr << "Unknown format: " << args.input_fmt << std::endl;
         return 1;

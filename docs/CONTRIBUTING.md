@@ -658,6 +658,7 @@ Your contributions help make MYTHOS.cpp better for everyone. Thank you for being
 - **New to C++?** Check out [learncpp.com](https://www.learncpp.com/)
 - **New to AI?** Check out [fast.ai](https://course.fast.ai/)
 - **Questions?** Open a discussion or ask in a PR comment
+- **Per-file docs?** See the [wiki/files/](../wiki/files/_index.md) for detailed source documentation
 
 ---
 

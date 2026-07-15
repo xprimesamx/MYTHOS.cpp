@@ -702,6 +702,9 @@ MYTHOS.cpp uses JSON files for configuration.
 
 ## 📚 Additional Resources
 
+- **[Wiki Usage Guide](../wiki/Usage-Guide.md)** — Extended usage examples and tips
+- **[Wiki Inference Guide](../wiki/Inference.md)** — In-depth inference documentation
+- **[Wiki Training Guide](../wiki/Training.md)** — Detailed training instructions
 - **[API Reference](API_REFERENCE.md)** - Complete API documentation
 - **[Architecture](ARCHITECTURE.md)** - System architecture overview
 - **[Research](RESEARCH.md)** - Research papers and algorithms

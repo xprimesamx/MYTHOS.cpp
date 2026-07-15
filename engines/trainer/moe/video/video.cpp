@@ -49,6 +49,7 @@ Tensor VideoEncoder::forward(const Tensor& video) {
     int64_t n_patches_h = H_ / ps;
     int64_t n_patches_w = W_ / ps;
     Tensor tube_flat({B, n, tube_dim});
+    tube_flat.zero_();
     float* tf = tube_flat.data<float>();
     const float* vid = video.data<float>();
     for (int64_t b = 0; b < B; ++b) {

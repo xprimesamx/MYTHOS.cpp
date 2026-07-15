@@ -87,6 +87,7 @@ bool is_directx_available();
 bool is_vulkan_available();
 
 int64_t cpu_memory_free();
+int64_t cpu_memory_total();
 int64_t gpu_memory_free(int64_t device_id);
 int64_t igpu_memory_free();
 

@@ -479,6 +479,7 @@ For CI/CD pipelines, use:
 
 ## 📚 Additional Resources
 
+- [Wiki Build Guide](../wiki/Build-Guide.md) — Extended build documentation with troubleshooting
 - [CMake Documentation](https://cmake.org/documentation/)
 - [Ninja Build System](https://ninja-build.org/)
 - [Clang Documentation](https://clang.llvm.org/docs/)

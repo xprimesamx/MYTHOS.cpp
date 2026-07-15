@@ -23,6 +23,8 @@
 - [GPU Compute](#-gpu-compute)
 - [Memory Management](#-memory-management)
 
+> **Per-file API details:** For implementation-level API documentation, see the **[wiki/files/](../wiki/files/_index.md)** directory with per-file docs for every source file.
+
 ---
 
 ## 🏷️ Core Types

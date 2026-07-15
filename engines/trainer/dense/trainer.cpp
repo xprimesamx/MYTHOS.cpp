@@ -64,11 +64,8 @@ void DenseTrainer::compile(const TrainConfig& cfg) {
         optimizer_.add_param(p);
     }
 
-    int total_steps_est = cfg.num_epochs * 100000;
-    optimizer_.set_schedule(AdamW::Schedule::WARMUP_COSINE, cfg.warmup_steps, total_steps_est);
-
-    metrics_ = TrainMetrics{};
     step_ = 0;
+    metrics_ = TrainMetrics{};
 }
 
 float DenseTrainer::train_step(const Tensor& input_ids, const Tensor& labels) {
@@ -98,10 +95,11 @@ float DenseTrainer::train_step(const Tensor& input_ids, const Tensor& labels) {
 
     AutogradEngine::instance().backward(loss_tensor);
 
+    AutogradEngine::set_enabled(prev_ag);
+
     clip_gradients(config_.grad_clip);
 
     optimizer_.step();
-    AutogradEngine::set_enabled(prev_ag);
 
     metrics_.loss = loss_val;
     metrics_.perplexity = std::exp(loss_val);
@@ -116,7 +114,10 @@ void DenseTrainer::zero_grad() {
 }
 
 void DenseTrainer::clip_gradients(float max_norm) {
-    if (max_norm <= 0.0f) return;
+    if (max_norm <= 0.0f) {
+        metrics_.grad_norm = 0.0f;
+        return;
+    }
 
     auto params = get_parameters();
     float total_norm = 0.0f;
@@ -125,8 +126,7 @@ void DenseTrainer::clip_gradients(float max_norm) {
         if (!p->requires_grad()) continue;
         const Tensor& g_ref = p->grad();
         if (g_ref.numel() == 0) continue;
-        Tensor g = g_ref;
-        float gn = math::norm(g);
+        float gn = math::norm(g_ref);
         total_norm += gn * gn;
     }
 
@@ -137,9 +137,7 @@ void DenseTrainer::clip_gradients(float max_norm) {
         float scale = max_norm / total_norm;
         for (auto* p : params) {
             if (!p->requires_grad()) continue;
-            const Tensor& g_ref = p->grad();
-            if (g_ref.numel() == 0) continue;
-            Tensor g = g_ref;
+            Tensor g = p->grad();
             float* gd = g.data<float>();
             int64_t n = g.numel();
             for (int64_t i = 0; i < n; ++i)
@@ -150,8 +148,8 @@ void DenseTrainer::clip_gradients(float max_norm) {
 }
 
 void DenseTrainer::fit(DataLoader& loader) {
-    int total_steps = config_.num_epochs * (int)loader.num_batches();
-    optimizer_.set_schedule(AdamW::Schedule::WARMUP_COSINE, config_.warmup_steps, total_steps);
+    int64_t total_steps = (int64_t)config_.num_epochs * loader.num_batches();
+    optimizer_.set_schedule(AdamW::Schedule::WARMUP_COSINE, config_.warmup_steps, (int)total_steps);
 
     auto start_time = std::chrono::steady_clock::now();
     int64_t total_tokens = 0;

@@ -74,6 +74,10 @@ Status InferenceEngine::load(const std::string& oil_path) {
         if (!std::filesystem::exists(oil_path))
             return Status::error("File not found: " + oil_path);
 
+        // Free previously owned resources before loading new ones
+        if (owns_model_) { delete model_; model_ = nullptr; owns_model_ = false; }
+        if (owns_tokenizer_) { delete tokenizer_; tokenizer_ = nullptr; owns_tokenizer_ = false; }
+
         OILReader reader(oil_path);
         auto config_data = reader.read_config();
 
@@ -96,16 +100,11 @@ Status InferenceEngine::load(const std::string& oil_path) {
         auto tokenizer = std::make_unique<BPETokenizer>();
         tokenizer->load(vocab_path);
 
-        model_ = model.release();
-        tokenizer_ = tokenizer.release();
-        owns_model_ = true;
-        owns_tokenizer_ = true;
-
         EngineConfig cfg;
         cfg.max_seq_len = (std::min)(model_cfg.max_seq_len, (int64_t)2048);
         cfg.use_kv_cache = true;
         cfg.sampler.max_tokens = 2048;
-        init(model_, tokenizer_, cfg);
+        init(model.release(), tokenizer.release(), cfg);
         owns_model_ = true;
         owns_tokenizer_ = true;
 
@@ -134,14 +133,6 @@ std::pair<std::string, InferenceStats> InferenceEngine::generate_with_stats(cons
     update_stats(num_tokens, result.duration_sec > 0 ? result.duration_sec : duration);
 
     return { result.text, stats_ };
-}
-
-void InferenceEngine::generate_stream(
-    const std::string& prompt,
-    std::function<void(const std::string&)> on_token)
-{
-    if (!generator_) return;
-    generator_->generate_stream(prompt, config_.sampler, std::move(on_token));
 }
 
 std::vector<std::string> InferenceEngine::generate_batch(const std::vector<std::string>& prompts) {

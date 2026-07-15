@@ -32,16 +32,16 @@ EncodedBlock OIL8Encoder::encode(const float* weights, uint32_t num_weights, uin
 }
 
 std::vector<EncodedBlock> OIL8Encoder::encode_tensor(const Tensor& t, const std::string& name) {
-    (void)name;
     const float* data = t.data<float>();
     uint32_t total = static_cast<uint32_t>(t.numel());
-    int bs = config_.block_size;
+    uint32_t bs = static_cast<uint32_t>(config_.block_size);
 
     std::vector<EncodedBlock> blocks;
     uint32_t block_id = 0;
     for (uint32_t offset = 0; offset < total; offset += bs) {
-        uint32_t count = std::min(bs, static_cast<int>(total - offset));
+        uint32_t count = std::min(bs, total - offset);
         blocks.push_back(encode(data + offset, count, block_id++));
+        blocks.back().name = name;
     }
 
     return blocks;

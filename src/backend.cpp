@@ -2,17 +2,25 @@
 #include "oil/math.h"
 #include "oil/kernel.h"
 #include "oil/gpu_compute.h"
-#define WIN32_LEAN_AND_MEAN
-#define NOMINMAX
-#include <windows.h>
-#include <intrin.h>
 #include <thread>
 #include <cstring>
 #include <chrono>
 #include <algorithm>
 
-#if defined(_MSC_VER)
+#if defined(_WIN32)
+#define WIN32_LEAN_AND_MEAN
+#define NOMINMAX
+#include <windows.h>
 #include <intrin.h>
+#elif defined(__linux__)
+#include <unistd.h>
+#include <sys/sysinfo.h>
+#include <cpuid.h>
+#include <dlfcn.h>
+#elif defined(__APPLE__)
+#include <unistd.h>
+#include <sys/sysctl.h>
+#include <TargetConditionals.h>
 #endif
 
 namespace oil {
@@ -52,12 +60,7 @@ public:
 
     bool is_available() const override { return true; }
     int64_t memory_free() const override { return cpu_memory_free(); }
-    int64_t memory_total() const override {
-        MEMORYSTATUSEX mem;
-        mem.dwLength = sizeof(mem);
-        GlobalMemoryStatusEx(&mem);
-        return (int64_t)mem.ullTotalPhys;
-    }
+    int64_t memory_total() const override { return cpu_memory_total(); }
     void synchronize() override {}
 };
 
@@ -145,11 +148,7 @@ public:
     void zero(Tensor& t) override { t.zero_(); }
     bool is_available() const override { return is_avx2_available(); }
     int64_t memory_free() const override { return cpu_memory_free(); }
-    int64_t memory_total() const override {
-        SYSTEM_INFO sys;
-        GetSystemInfo(&sys);
-        return (int64_t)sys.lpMaximumApplicationAddress;
-    }
+    int64_t memory_total() const override { return cpu_memory_total(); }
     void synchronize() override {}
 };
 #endif // OIL_AVX2
@@ -190,6 +189,7 @@ public:
 // iGPU SHARED BACKEND (DirectX Compute via compute shader)
 // ========================================================================
 
+#ifdef OIL_USE_DIRECTX
 class IGPUSharedBackend : public ComputeBackend {
 public:
     BackendType type() const override { return BackendType::IGPU_SHARED; }
@@ -307,13 +307,18 @@ public:
     bool is_available() const override { return dx_ && dx_->is_initialized(); }
     int64_t memory_free() const override { return dx_ ? dx_->memory_free() : cpu_memory_free(); }
     int64_t memory_total() const override {
+#if defined(_WIN32)
         MEMORYSTATUSEX mem;
         mem.dwLength = sizeof(mem);
         GlobalMemoryStatusEx(&mem);
         return (int64_t)mem.ullTotalPhys;
+#else
+        return cpu_memory_total();
+#endif
     }
     void synchronize() override { if (dx_) dx_->synchronize(); }
 };
+#endif // OIL_USE_DIRECTX
 
 // ========================================================================
 // RAM SWAP BACKEND (memory-efficient, CPU, disk swap)
@@ -347,10 +352,7 @@ public:
 
     bool is_available() const override { return true; }
     int64_t memory_free() const override {
-        MEMORYSTATUSEX mem;
-        mem.dwLength = sizeof(mem);
-        GlobalMemoryStatusEx(&mem);
-        return (int64_t)mem.ullAvailPhys;
+        return cpu_memory_free();
     }
 };
 
@@ -422,8 +424,10 @@ ComputeBackend* ComputeBackend::create(const BackendConfig& cfg) {
 #if defined(OIL_AVX2) && defined(OIL_AVX512)
         case BackendType::CPU_AVX512: return new CPUAVX512Backend();
 #endif
+#ifdef OIL_USE_DIRECTX
         case BackendType::GPU_DIRECTX: return new GPUDirectXBackend();
         case BackendType::IGPU_SHARED: return new IGPUSharedBackend();
+#endif
         case BackendType::RAM_SWAP: return new RAMSwapBackend();
         case BackendType::DISTRIBUTED: return new DistributedBackend();
         default: return new CPUScalarBackend();
@@ -434,15 +438,31 @@ ComputeBackend* ComputeBackend::create(const BackendConfig& cfg) {
 // Hardware detection
 // ========================================================================
 
+static inline void oil_cpuid(int info[4], int leaf) {
+#if defined(_MSC_VER)
+    __cpuid(info, leaf);
+#else
+    __cpuid(leaf, info[0], info[1], info[2], info[3]);
+#endif
+}
+
+static inline void oil_cpuidex(int info[4], int leaf, int sub) {
+#if defined(_MSC_VER)
+    __cpuidex(info, leaf, sub);
+#else
+    __cpuid_count(leaf, sub, info[0], info[1], info[2], info[3]);
+#endif
+}
+
 bool is_avx2_available() {
 #if defined(OIL_AVX2)
     return true;
 #else
     int cpu_info[4] = {0};
-    __cpuid(cpu_info, 0);
+    oil_cpuid(cpu_info, 0);
     int n_ids = cpu_info[0];
     if (n_ids >= 7) {
-        __cpuidex(cpu_info, 7, 0);
+        oil_cpuidex(cpu_info, 7, 0);
         return (cpu_info[1] & (1 << 5)) != 0;
     }
     return false;
@@ -454,10 +474,10 @@ bool is_avx512_available() {
     return true;
 #else
     int cpu_info[4] = {0};
-    __cpuid(cpu_info, 0);
+    oil_cpuid(cpu_info, 0);
     int n_ids = cpu_info[0];
     if (n_ids >= 7) {
-        __cpuidex(cpu_info, 7, 0);
+        oil_cpuidex(cpu_info, 7, 0);
         return (cpu_info[1] & (1 << 16)) != 0;
     }
     return false;
@@ -483,9 +503,11 @@ bool is_cuda_available() {
 bool is_directx_available() {
 #if defined(OIL_USE_DIRECTX)
     return true;
-#else
+#elif defined(_WIN32)
     HMODULE d3d12 = LoadLibraryA("d3d12.dll");
     if (d3d12) { FreeLibrary(d3d12); return true; }
+    return false;
+#else
     return false;
 #endif
 }
@@ -493,22 +515,70 @@ bool is_directx_available() {
 bool is_vulkan_available() {
 #if defined(OIL_USE_VULKAN)
     return true;
-#else
+#elif defined(_WIN32)
     HMODULE vulkan = LoadLibraryA("vulkan-1.dll");
     if (vulkan) { FreeLibrary(vulkan); return true; }
+    return false;
+#elif defined(__linux__)
+    void* lib = dlopen("libvulkan.so.1", RTLD_LAZY | RTLD_LOCAL);
+    if (lib) { dlclose(lib); return true; }
+    lib = dlopen("libvulkan.so", RTLD_LAZY | RTLD_LOCAL);
+    if (lib) { dlclose(lib); return true; }
+    return false;
+#else
     return false;
 #endif
 }
 
 int64_t cpu_memory_free() {
+#if defined(_WIN32)
     MEMORYSTATUSEX mem;
     mem.dwLength = sizeof(mem);
     GlobalMemoryStatusEx(&mem);
     return (int64_t)mem.ullAvailPhys;
+#elif defined(__linux__)
+    long pages = sysconf(_SC_AVPHYS_PAGES);
+    long page_size = sysconf(_SC_PAGE_SIZE);
+    return (int64_t)pages * (int64_t)page_size;
+#elif defined(__APPLE__)
+    int64_t free_pages = 0;
+    size_t len = sizeof(free_pages);
+    if (sysctlbyname("vm.page_free_count", &free_pages, &len, NULL, 0) == 0) {
+        int64_t page_size = 0;
+        len = sizeof(page_size);
+        sysctlbyname("hw.pagesize", &page_size, &len, NULL, 0);
+        if (page_size == 0) page_size = 4096;
+        return free_pages * page_size;
+    }
+    return 8LL * 1024 * 1024 * 1024;
+#else
+    return 8LL * 1024 * 1024 * 1024;
+#endif
+}
+
+int64_t cpu_memory_total() {
+#if defined(_WIN32)
+    MEMORYSTATUSEX mem;
+    mem.dwLength = sizeof(mem);
+    GlobalMemoryStatusEx(&mem);
+    return (int64_t)mem.ullTotalPhys;
+#elif defined(__linux__)
+    long pages = sysconf(_SC_PHYS_PAGES);
+    long page_size = sysconf(_SC_PAGE_SIZE);
+    return (int64_t)pages * (int64_t)page_size;
+#elif defined(__APPLE__)
+    int64_t mem = 0;
+    size_t len = sizeof(mem);
+    sysctlbyname("hw.memsize", &mem, &len, NULL, 0);
+    return mem;
+#else
+    return 16LL * 1024 * 1024 * 1024;
+#endif
 }
 
 int64_t gpu_memory_free(int64_t device_id) {
     (void)device_id;
+#if defined(_WIN32)
     if (is_directx_available()) {
         try {
             auto& dx = gpu::get_dx_compute();
@@ -516,14 +586,12 @@ int64_t gpu_memory_free(int64_t device_id) {
                 return dx.memory_free();
         } catch (...) {}
     }
+#endif
     return cpu_memory_free();
 }
 
 int64_t igpu_memory_free() {
-    MEMORYSTATUSEX mem;
-    mem.dwLength = sizeof(mem);
-    GlobalMemoryStatusEx(&mem);
-    return (int64_t)mem.ullAvailPhys;
+    return cpu_memory_free();
 }
 
 Tensor to_backend(const Tensor& t, BackendType dst) {
@@ -556,13 +624,11 @@ HardwareProfile probe_hardware() {
     hw.has_vulkan = is_vulkan_available();
 
     // RAM
-    MEMORYSTATUSEX mem = {};
-    mem.dwLength = sizeof(mem);
-    GlobalMemoryStatusEx(&mem);
-    hw.ram_total = (int64_t)mem.ullTotalPhys;
-    hw.ram_free = (int64_t)mem.ullAvailPhys;
+    hw.ram_total = cpu_memory_total();
+    hw.ram_free = cpu_memory_free();
 
     // GPU VRAM (DirectX)
+#if defined(_WIN32)
     if (hw.has_directx) {
         try {
             auto& dx = gpu::get_dx_compute();
@@ -571,14 +637,18 @@ HardwareProfile probe_hardware() {
                 hw.vram_total = dx.memory_total();
             }
         } catch (...) {
-            // DirectX init may fail in edge cases; leave vram at 0
         }
     }
+#endif
 
     // CPU cores/threads
+#if defined(_WIN32)
     SYSTEM_INFO sys = {};
     GetSystemInfo(&sys);
     hw.cpu_cores = (int32_t)sys.dwNumberOfProcessors;
+#else
+    hw.cpu_cores = (int32_t)std::thread::hardware_concurrency();
+#endif
     hw.cpu_threads = (int32_t)std::thread::hardware_concurrency();
 
     // OS detection

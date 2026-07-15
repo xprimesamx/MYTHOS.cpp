@@ -75,6 +75,7 @@ build/tools/oil-train --config config.json --data data/tinyshakespeare.txt --out
 - [Performance Targets](#-performance-targets)
 - [Tools & CLI](#-tools--cli)
 - [Project Structure](#-project-structure)
+- [Documentation](#-documentation)
 - [Honest Flags](#-honest-flags)
 - [Contributing](#-contributing)
 - [License](#-license)
@@ -2014,6 +2015,25 @@ MYTHOS.cpp/
 │   │       └── embeddings/
 │   └── multimodal/
 │
+├── wiki/                       # Per-file documentation (repo-wiki style)
+│   ├── Home.md                 # Wiki home page
+│   ├── files/                  # 91 per-file docs
+│   │   ├── _index.md           # File docs index
+│   │   ├── types.h.md, tensor.h.md, ...
+│   │   ├── tensor.cpp.md, math.cpp.md, ...
+│   │   ├── engine-inference.cpp.md, ...
+│   │   └── tool-convert.cpp.md, ...
+│   ├── Architecture.md
+│   ├── Build-Guide.md
+│   ├── Usage-Guide.md
+│   ├── Api-Reference.md
+│   ├── OIL-Format.md
+│   ├── Training.md
+│   ├── Inference.md
+│   ├── Research.md
+│   ├── Contributing.md
+│   └── _Sidebar.md
+│
 ├── .bitnet/                    # Reference knowledge (BitNet.cpp)
 ├── data/                       # Training data (tinyshakespeare.txt)
 │
@@ -2027,6 +2047,32 @@ MYTHOS.cpp/
 ├── my_model.oil                # Sample OIL model
 └── oil_config.h.in             # Config template
 ```
+
+---
+
+## 📚 Documentation
+
+MYTHOS.cpp has two levels of documentation:
+
+### Quick Reference — `docs/`
+
+The **[docs/](docs/)** folder contains structured, topic-based documentation:
+- **[ARCHITECTURE.md](docs/ARCHITECTURE.md)** — System design & philosophy
+- **[BUILD.md](docs/BUILD.md)** — Build & installation guide
+- **[USAGE.md](docs/USAGE.md)** — Usage guide & examples
+- **[API_REFERENCE.md](docs/API_REFERENCE.md)** — Complete C++ API reference
+- **[RESEARCH.md](docs/RESEARCH.md)** — Research foundation & papers
+- **[MODULES/](docs/MODULES/)** — Per-module deep dives
+- **[INTERNAL/](docs/INTERNAL/)** — Internal design documents
+
+### Per-File Deep Dive — `wiki/`
+
+The **[wiki/](wiki/Home.md)** folder contains **repo-wiki style documentation** with one markdown file per source file:
+- Every header (`include/oil/`), source (`src/`), engine, tool, and test file documented
+- See **[wiki/files/_index.md](wiki/files/_index.md)** for the full file listing
+- Covers purpose, key types, implementation details, and dependencies for each file
+
+> Start with **[wiki/Home.md](wiki/Home.md)** for a guided tour of the codebase.
 
 ---
 

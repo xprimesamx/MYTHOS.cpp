@@ -10,7 +10,8 @@ AudioEncoder::AudioEncoder(int64_t n_mels, int64_t hidden, int64_t num_layers, i
 {
     conv_proj = Tensor({n_mels, hidden});
     conv_proj.zero_();
-    pos_embed = Tensor::zeros(Shape{1024, hidden});
+    pos_embed = Tensor({1024, hidden});
+    pos_embed.zero_();
 
     TransformerConfig tcfg;
     tcfg.hidden_size = hidden;

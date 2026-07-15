@@ -37,6 +37,7 @@ public:
     int64_t hidden_size;
     int64_t num_classes;
     int64_t max_detections;
+    Tensor last_class_scores;
 };
 
 class SceneGraphEncoder {

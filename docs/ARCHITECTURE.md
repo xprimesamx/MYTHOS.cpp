@@ -682,6 +682,8 @@ To understand MYTHOS.cpp better, study these topics:
 - See **[MODULES/](MODULES/)** for detailed module documentation
 - See **[RESEARCH.md](RESEARCH.md)** for research papers and references
 - See **[INTERNAL/](INTERNAL/)** for internal design documents
+- See **[wiki/Architecture.md](../wiki/Architecture.md)** for architecture overview in wiki format
+- See **[wiki/files/](../wiki/files/_index.md)** for per-file source documentation
 - Check the source code - it's well-commented!
 
 ---

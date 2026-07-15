@@ -79,12 +79,14 @@ void DenseTrainer::save_checkpoint(const std::string& path) {
         write_tensor_ser(file, name, *params[i]);
     }
 
+    if (params.size() > UINT32_MAX)
+        throw Error("checkpoint: too many optimizer state entries");
     uint32_t num_opt = (uint32_t)params.size();
     file.write((const char*)&num_opt, sizeof(num_opt));
 
     auto& state_map = optimizer_.mutable_state();
-    uint32_t idx = 0;
-    for (auto* p : params) {
+    for (uint32_t idx = 0; idx < num_opt; ++idx) {
+        auto* p = params[idx];
         auto it = state_map.find(p);
         if (it != state_map.end()) {
             write_tensor_ser(file, "m_" + std::to_string(idx), it->second.m);
@@ -93,7 +95,6 @@ void DenseTrainer::save_checkpoint(const std::string& path) {
             write_tensor_ser(file, "m_" + std::to_string(idx), Tensor::zeros(p->shape()));
             write_tensor_ser(file, "v_" + std::to_string(idx), Tensor::zeros(p->shape()));
         }
-        ++idx;
     }
 
     file.close();
@@ -126,6 +127,9 @@ void DenseTrainer::load_checkpoint(const std::string& path) {
     for (uint32_t i = 0; i < num_params; ++i) {
         std::string loaded_name;
         Tensor t = read_tensor_ser(file, loaded_name);
+        std::string expected = "param_" + std::to_string(i);
+        if (loaded_name != expected)
+            throw Error("load_checkpoint: param name mismatch at " + std::to_string(i));
         params[i]->copy_from(t);
         params[i]->requires_grad(true);
     }
@@ -152,6 +156,11 @@ void DenseTrainer::load_checkpoint(const std::string& path) {
             std::string m_name, v_name;
             Tensor m_t = read_tensor_ser(file, m_name);
             Tensor v_t = read_tensor_ser(file, v_name);
+
+            std::string m_exp = "m_" + std::to_string(i);
+            std::string v_exp = "v_" + std::to_string(i);
+            if (m_name != m_exp || v_name != v_exp)
+                throw Error("load_checkpoint: optimizer state name mismatch at idx " + std::to_string(i));
 
             auto it = state_map.find(p);
             if (it != state_map.end()) {

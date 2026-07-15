@@ -83,6 +83,7 @@ Tensor ObjectDetector::forward(const Tensor& visual_features) {
     math::gemm(1.0f, attn_flat, bbox_head, 0.0f, bbox_raw);
     math::gemm(1.0f, attn_flat, class_head, 0.0f, class_raw);
     Tensor bbox_out = bbox_raw.reshape({B, N, 4});
+    last_class_scores = class_raw.reshape({B, N, num_classes});
 
     return bbox_out;
 }
@@ -122,9 +123,14 @@ Tensor SceneGraphEncoder::forward(const Tensor& obj_features, const Tensor& spat
     }
 
     const float* se = spatial_embed.data<float>();
-    for (int64_t p = 0; p < num_pairs; ++p)
+    const int64_t spatial_embed_rows = spatial_embed.dim(0);
+    for (int64_t p = 0; p < num_pairs; ++p) {
+        int64_t edge_idx = (int64_t)std::round(spatial_edges.data<float>()[p]);
+        if (edge_idx >= spatial_embed_rows) edge_idx = spatial_embed_rows - 1;
+        if (edge_idx < 0) edge_idx = 0;
         for (int64_t d = 0; d < D; ++d)
-            pf[p * D * 2 + d] += se[(int64_t)spatial_edges.data<float>()[p] * D + d];
+            pf[p * D * 2 + d] += se[edge_idx * D + d];
+    }
 
     Tensor relations({num_pairs, num_relation_types});
     math::gemm(1.0f, pair_feats, relation_head, 0.0f, relations);
@@ -262,6 +268,7 @@ SceneGraph VisionEncoder::understand_image(const Tensor& image) {
 
     SceneGraph graph;
     graph.objects = bbox_out;
+    graph.labels = detector.last_class_scores;
     Tensor global_feat({B, D});
     Tensor cls_feat_2d = cls_features.reshape({B, D});
     math::gemm(1.0f, cls_feat_2d, global_pool, 0.0f, global_feat);

@@ -153,29 +153,44 @@ Dive into optimization and specialized features:
 
 ## 📖 Documentation Status
 
-| Module | Documentation | Status | Priority |
-|--------|--------------|--------|----------|
-| Tensor | ✅ Complete | [tensor.md](tensor.md) | High |
-| Types | ⏳ Planned | | Medium |
-| Memory | ⏳ Planned | | Medium |
-| Math | ⏳ Planned | | Medium |
-| Autograd | ⏳ Planned | | Medium |
-| Transformer | ⏳ Planned | | Medium |
-| Model | ⏳ Planned | | Medium |
-| Backend | ⏳ Planned | | Low |
-| Quantization | ⏳ Planned | | Medium |
-| OIL Format | ⏳ Planned | | Medium |
-| Codebook | ⏳ Planned | | Low |
-| STE Quantizer | ⏳ Planned | | Low |
-| Format Planner | ⏳ Planned | | Low |
-| Trainer | ⏳ Planned | | Medium |
-| Optimizer | ⏳ Planned | | Medium |
-| Finetune | ⏳ Planned | | Low |
-| Tokenizer | ⏳ Planned | | Medium |
-| Sampler | ⏳ Planned | | Medium |
-| KV Cache | ⏳ Planned | | Low |
-| MoE Variants | ⏳ Planned | | Medium |
-| GPU Compute | ⏳ Planned | | Medium |
+| Module | Documentation | Wiki File Docs | Priority |
+|--------|--------------|---------------|----------|
+| Tensor | ✅ Complete | [tensor.h.md](../../wiki/files/tensor.h.md) | High |
+| Types | ✅ Complete | [types.h.md](../../wiki/files/types.h.md) | Medium |
+| Memory | ✅ Complete | [memory.h.md](../../wiki/files/memory.h.md) | Medium |
+| Math | ✅ Complete | [math.h.md](../../wiki/files/math.h.md) | Medium |
+| Autograd | ✅ Complete | [autograd.cpp.md](../../wiki/files/autograd.cpp.md) | Medium |
+| Transformer | ✅ Complete | [transformer.h.md](../../wiki/files/transformer.h.md) | Medium |
+| Model | ✅ Complete | [model.h.md](../../wiki/files/model.h.md) | Medium |
+| Backend | ✅ Complete | [backend.h.md](../../wiki/files/backend.h.md) | Low |
+| Quantization | ✅ Complete | [kernel_tl.cpp.md](../../wiki/files/kernel_tl.cpp.md) | Medium |
+| OIL Format | ✅ Complete | [oil_format.h.md](../../wiki/files/oil_format.h.md) | Medium |
+| Codebook | ✅ Complete | [codebook.h.md](../../wiki/files/codebook.h.md) | Low |
+| STE Quantizer | ✅ Complete | [ste_quantizer.h.md](../../wiki/files/ste_quantizer.h.md) | Low |
+| Format Planner | ✅ Complete | [format_planner.h.md](../../wiki/files/format_planner.h.md) | Low |
+| Trainer | ✅ Complete | [trainer.h.md](../../wiki/files/trainer.h.md) | Medium |
+| Optimizer | ✅ Complete | [optimizer.h.md](../../wiki/files/optimizer.h.md) | Medium |
+| Finetune | ✅ Complete | [finetune.h.md](../../wiki/files/finetune.h.md) | Low |
+| Tokenizer | ✅ Complete | [tokenizer.h.md](../../wiki/files/tokenizer.h.md) | Medium |
+| Sampler | ✅ Complete | [sampler.h.md](../../wiki/files/sampler.h.md) | Medium |
+| KV Cache | ✅ Complete | [kv_cache.h.md](../../wiki/files/kv_cache.h.md) | Low |
+| MoE Variants | ✅ Complete | [moe_variants.h.md](../../wiki/files/moe_variants.h.md) | Medium |
+| GPU Compute | ✅ Complete | [gpu_compute.h.md](../../wiki/files/gpu_compute.h.md) | Medium |
+
+---
+
+---
+
+## 📄 Per-File Wiki Documentation
+
+Every source file in the MYTHOS.cpp codebase has a dedicated documentation page in the **[wiki/files/](../../wiki/files/)** directory. These provide:
+
+- **Line-by-line insights** into each file's purpose and logic
+- **Key types & functions** defined in each file
+- **Dependencies** and relationships between files
+- **Build & usage notes** specific to each component
+
+Browse the full index at **[wiki/files/_index.md](../../wiki/files/_index.md)**.
 
 ---
 
@@ -185,7 +200,7 @@ Dive into optimization and specialized features:
 
 1. Read the module's README (e.g., [tensor.md](tensor.md))
 2. Check the API reference in the document
-3. Look at the source code for implementation details
+3. Look at the per-file wiki docs in [wiki/files/](../../wiki/files/) for implementation details
 4. Run the tests to see usage examples
 
 ### For Contributing to a Module

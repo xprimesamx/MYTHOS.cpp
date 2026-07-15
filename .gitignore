@@ -1,5 +1,11 @@
 # Build
 build/
+build_wsl/
+build_windows/
+build_linux/
+build_linux2/
+build_check/
+build2/
 *.exe
 *.o
 *.obj
@@ -23,6 +29,19 @@ __pycache__/
 *.swp
 .DS_Store
 Thumbs.db
+
+# WDAC / signing artifacts
+tools/wdac/*.bin
+tools/wdac/*.pfx
+tools/wdac/*.cer
+
+# Temp build dirs
+build_windows_temp/
+
+# Generated graphs
+graphify-out/
+Testing/
+_test_checkpoint.oil.opt
 
 # Template artifacts (unused)
 .bitnet/
