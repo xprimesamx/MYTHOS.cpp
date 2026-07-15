@@ -101,7 +101,10 @@ static void test_prefix_cache() {
     CHECK(match >= 0, "partial match found");
 
     auto* kv = pc.get_cache(0, 0);
-    CHECK(kv == nullptr, "get_cache returns nullptr (stub)");
+    CHECK(kv != nullptr, "get_cache returns cache for stored entry");
+    if (kv) {
+        CHECK(kv->context_len() == 0, "empty cache after store");
+    }
 }
 
 static void test_tree_decoder() {
@@ -229,8 +232,8 @@ static void test_logprobs() {
     for (auto& p : probs) {
         CHECK(p.size() == 4, "logprobs for each vocab entry");
         float sum = 0;
-        for (float v : p) sum += v;
-        CHECK_CLOSE(sum, 1.0f, 1e-4f, "logprobs sum to 1");
+        for (float v : p) sum += std::exp(v);
+        CHECK_CLOSE(sum, 1.0f, 1e-4f, "exp(logprobs) sum to 1");
     }
 }
 

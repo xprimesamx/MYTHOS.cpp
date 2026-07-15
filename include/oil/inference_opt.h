@@ -9,6 +9,7 @@
 #include <string>
 #include <functional>
 #include <memory>
+#include <mutex>
 
 namespace oil {
 
@@ -32,10 +33,16 @@ class SpeculativeDecoder {
 public:
     SpeculativeDecoder(Model* draft, Model* target, float gamma = 5.0f);
     std::vector<int> generate(const std::vector<int>& prompt, int max_tokens);
+    float acceptance_rate() const { return acceptance_rate_; }
 private:
     Model* draft_;
     Model* target_;
     float gamma_;
+    Sampler sampler_;
+    SamplerConfig sampler_cfg_;
+    float acceptance_rate_ = 0.0f;
+    int accepted_count_ = 0;
+    int total_count_ = 0;
     bool verify_tokens(const std::vector<int>& draft_tokens,
                        const Tensor& target_logits, int vocab_size);
 };
@@ -56,6 +63,8 @@ private:
     std::vector<BatchRequest> active_;
     std::vector<std::vector<int>> outputs_;
     std::vector<KVCache> kv_caches_;
+    Tensor build_attention_mask(int64_t B, int64_t S,
+                                const std::vector<int>& seq_lens) const;
 };
 
 // D4: KV cache compression — OIL4/ternary for K/V storage
@@ -98,6 +107,7 @@ private:
     struct Node { int token; float score; Node* parent; std::vector<Node*> children; };
     void expand_node(Node* n, int depth, int max_depth);
     void prune_tree(std::vector<Node*>& candidates);
+    void delete_subtree(Node* n);
 };
 
 // D7: Flash decoding — parallel KV reduction for multi-turn
@@ -168,6 +178,7 @@ private:
     int64_t capacity_, used_ = 0;
     std::vector<char> pool_;
     std::vector<bool> free_list_;
+    std::mutex mtx_;
 };
 
 // D14-D16: Stream, stop, logprob
@@ -220,6 +231,7 @@ private:
     std::vector<std::vector<bool>> allowed_tokens_;
     int vocab_size_ = 32000;
     bool matches_prefix(const std::vector<int>& prefix) const;
+    void parse_grammar(const std::string& grammar_file);
 };
 
 } // namespace oil
