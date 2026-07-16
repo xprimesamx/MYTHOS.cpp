@@ -1,6 +1,8 @@
 #include "oil/moe_variants.h"
+#include "oil/random.h"
 #include <cstring>
 #include <unordered_map>
+#include <memory>
 
 namespace oil {
 namespace moe {
@@ -942,6 +944,597 @@ MoEOutput DeepSeekMoE::forward(const Tensor& x, bool training) {
     out.output = output.reshape(x.shape());
     out.num_activated_experts = E + 1;
     return out;
+}
+
+} // namespace moe
+} // namespace oil
+
+// ========================================================================
+// 11-24: Additional 14 MoE variant implementations
+// ========================================================================
+
+namespace oil {
+namespace moe {
+
+// 11. BASE Layer MoE
+BaseLayerMoE::BaseLayerMoE(int64_t hidden, const MoEAllConfig& cfg)
+    : config(cfg), hidden_size(hidden), router(hidden, cfg.num_experts) {
+    experts = create_experts(cfg.num_experts, hidden, cfg.expert_hidden_size, Activation::SiLU);
+}
+
+MoEOutput BaseLayerMoE::forward(const Tensor& x, bool training) {
+    (void)training;
+    int64_t B = x.dim(0), S = x.dim(1), D = hidden_size;
+    int64_t T = B * S, E = config.num_experts, K = config.top_k;
+    Tensor x_flat = x.reshape({T, D});
+    Tensor logits = router.forward(x_flat);
+    Tensor indices, weights;
+    Tensor probs = softmax_with_topk(logits, K, indices, weights);
+    float zl = 0.0f;
+    int64_t dropped = 0;
+    Tensor output = moe_dispatch_batched(x_flat, experts,
+        indices.data<int64_t>(), weights.data<float>(), T, K, E, D, &zl, &dropped);
+    MoEOutput out;
+    out.output = output.reshape({B, S, D});
+    out.router_logits = logits;
+    out.expert_indices = indices;
+    out.expert_weights = weights;
+    out.load_balance_loss = compute_load_balance_loss(logits, indices, E);
+    out.z_loss = config.z_loss_coef * zl / (float)T;
+    out.num_activated_experts = K;
+    out.tokens_dropped = dropped;
+    return out;
+}
+
+// 12. Dense MoE — all experts active
+DenseMoE::DenseMoE(int64_t hidden, const MoEAllConfig& cfg)
+    : config(cfg), hidden_size(hidden), gate(hidden, cfg.num_experts) {
+    experts = create_experts(cfg.num_experts, hidden, cfg.expert_hidden_size, Activation::SiLU);
+}
+
+MoEOutput DenseMoE::forward(const Tensor& x) {
+    int64_t B = x.dim(0), S = x.dim(1), D = hidden_size;
+    int64_t T = B * S, E = config.num_experts;
+    Tensor x_flat = x.reshape({T, D});
+    Tensor logits = gate.forward(x_flat);
+    Tensor probs({T, E});
+    math::softmax(logits, probs, 1);
+    const float* pd = probs.data<float>();
+    const float* xd = x_flat.data<float>();
+    Tensor output({T, D});
+    output.zero_();
+    float* od = output.data<float>();
+    float zl = 0.0f;
+    for (int64_t e = 0; e < E; ++e) {
+        Tensor batch_in({T, D});
+        float* bi = batch_in.data<float>();
+        for (int64_t t = 0; t < T; ++t)
+            std::memcpy(bi + t * D, xd + t * D, (size_t)D * sizeof(float));
+        Tensor expert_out = experts[(size_t)e].forward(batch_in);
+        const float* eo = expert_out.data<float>();
+        for (int64_t t = 0; t < T; ++t) {
+            float w = pd[t * E + e];
+            for (int64_t d = 0; d < D; ++d) {
+                float v = w * eo[t * D + d];
+                od[t * D + d] += v;
+                zl += v * v;
+            }
+        }
+    }
+    MoEOutput out;
+    out.output = output.reshape({B, S, D});
+    out.router_logits = logits;
+    out.load_balance_loss = 0.0f;
+    out.z_loss = config.z_loss_coef * zl / (float)T;
+    out.num_activated_experts = E;
+    return out;
+}
+
+// 13. Shared Expert MoE (standalone)
+SharedExpertMoE::SharedExpertMoE(int64_t hidden, const MoEAllConfig& cfg)
+    : config(cfg), hidden_size(hidden),
+      shared_expert(hidden, cfg.expert_hidden_size),
+      router(hidden, cfg.num_experts) {
+    routed_experts = create_experts(cfg.num_experts, hidden, cfg.expert_hidden_size, Activation::SiLU);
+}
+
+MoEOutput SharedExpertMoE::forward(const Tensor& x, bool training) {
+    (void)training;
+    int64_t B = x.dim(0), S = x.dim(1), D = hidden_size;
+    int64_t T = B * S, E = config.num_experts, K = config.top_k;
+    Tensor x_flat = x.reshape({T, D});
+    Tensor shared_out = shared_expert.forward(x_flat);
+    Tensor logits = router.forward(x_flat);
+    Tensor indices, weights;
+    softmax_with_topk(logits, K, indices, weights);
+    Tensor routed_out = moe_dispatch_batched(x_flat, routed_experts,
+        indices.data<int64_t>(), weights.data<float>(), T, K, E, D);
+    Tensor output({T, D});
+    float* od = output.data<float>();
+    const float* sd = shared_out.data<float>();
+    const float* rd = routed_out.data<float>();
+    for (int64_t i = 0; i < T * D; ++i)
+        od[i] = sd[i] + rd[i];
+    MoEOutput out;
+    out.output = output.reshape({B, S, D});
+    out.router_logits = logits;
+    out.load_balance_loss = compute_load_balance_loss(logits, indices, E);
+    out.num_activated_experts = E + 1;
+    return out;
+}
+
+// 14. Residual MoE — overflow via residual
+ResidualMoE::ResidualMoE(int64_t hidden, const MoEAllConfig& cfg)
+    : config(cfg), hidden_size(hidden), router(hidden, cfg.num_experts) {
+    experts = create_experts(cfg.num_experts, hidden, cfg.expert_hidden_size, Activation::SiLU);
+}
+
+MoEOutput ResidualMoE::forward(const Tensor& x) {
+    int64_t B = x.dim(0), S = x.dim(1), D = hidden_size;
+    int64_t T = B * S, E = config.num_experts, K = config.top_k;
+    Tensor x_flat = x.reshape({T, D});
+    Tensor logits = router.forward(x_flat);
+    Tensor indices, weights;
+    softmax_with_topk(logits, K, indices, weights);
+    float zl = 0.0f;
+    int64_t dropped = 0;
+    Tensor moe_out = moe_dispatch_batched(x_flat, experts,
+        indices.data<int64_t>(), weights.data<float>(), T, K, E, D, &zl, &dropped);
+    Tensor output({T, D});
+    float* od = output.data<float>();
+    const float* xd = x_flat.data<float>();
+    const float* md = moe_out.data<float>();
+    for (int64_t i = 0; i < T * D; ++i)
+        od[i] = xd[i] + md[i];
+    MoEOutput out;
+    out.output = output.reshape({B, S, D});
+    out.router_logits = logits;
+    out.load_balance_loss = compute_load_balance_loss(logits, indices, E);
+    out.z_loss = config.z_loss_coef * zl / (float)T;
+    out.num_activated_experts = K;
+    out.tokens_dropped = dropped;
+    return out;
+}
+
+// 15. Gating Dropout MoE
+GatingDropoutMoE::GatingDropoutMoE(int64_t hidden, const MoEAllConfig& cfg)
+    : config(cfg), hidden_size(hidden), router(hidden, cfg.num_experts) {
+    experts = create_experts(cfg.num_experts, hidden, cfg.expert_hidden_size, Activation::SiLU);
+}
+
+MoEOutput GatingDropoutMoE::forward(const Tensor& x, bool training) {
+    int64_t B = x.dim(0), S = x.dim(1), D = hidden_size;
+    int64_t T = B * S, E = config.num_experts, K = config.top_k;
+    Tensor x_flat = x.reshape({T, D});
+    Tensor logits = router.forward(x_flat);
+    if (training && dropout_rate > 0.0f) {
+        float* ld = logits.data<float>();
+        RNG rng(42);
+        for (int64_t i = 0; i < T * E; ++i) {
+            if (rng.uniform() < dropout_rate)
+                ld[i] = 0.0f;
+        }
+    }
+    Tensor indices, weights;
+    softmax_with_topk(logits, K, indices, weights);
+    float zl = 0.0f;
+    int64_t dropped = 0;
+    Tensor output = moe_dispatch_batched(x_flat, experts,
+        indices.data<int64_t>(), weights.data<float>(), T, K, E, D, &zl, &dropped);
+    MoEOutput out;
+    out.output = output.reshape({B, S, D});
+    out.router_logits = logits;
+    out.load_balance_loss = compute_load_balance_loss(logits, indices, E);
+    out.z_loss = config.z_loss_coef * zl / (float)T;
+    out.num_activated_experts = K;
+    out.tokens_dropped = dropped;
+    return out;
+}
+
+// 16. Domain MoE
+DomainMoE::DomainMoE(int64_t hidden, const MoEAllConfig& cfg)
+    : config(cfg), hidden_size(hidden), domain_classifier(hidden, num_domains) {
+    domain_experts.resize(num_domains);
+    domain_routers.reserve(num_domains);
+    int64_t per_domain = cfg.num_experts / num_domains;
+    if (per_domain < 1) per_domain = 1;
+    for (int64_t d = 0; d < num_domains; ++d) {
+        domain_experts[(size_t)d] = create_experts(per_domain, hidden, cfg.expert_hidden_size, Activation::SiLU);
+        domain_routers.emplace_back(hidden, per_domain);
+    }
+}
+
+MoEOutput DomainMoE::forward(const Tensor& x, int64_t domain_id) {
+    int64_t B = x.dim(0), S = x.dim(1), D = hidden_size;
+    int64_t T = B * S;
+    Tensor x_flat = x.reshape({T, D});
+    Tensor dom_logits = domain_classifier.forward(x_flat);
+    Tensor dom_probs({T, num_domains});
+    math::softmax(dom_logits, dom_probs, 1);
+    int64_t K = config.top_k;
+    Tensor output({T, D});
+    output.zero_();
+    float* od = output.data<float>();
+    const float* xd = x_flat.data<float>();
+    float total_lb = 0.0f;
+    for (int64_t d = 0; d < num_domains; ++d) {
+        int64_t E = (int64_t)domain_experts[(size_t)d].size();
+        Tensor r_logits = domain_routers[(size_t)d].forward(x_flat);
+        Tensor indices, weights;
+        softmax_with_topk(r_logits, K, indices, weights);
+        float zl = 0.0f;
+        Tensor d_out = moe_dispatch_batched(x_flat, domain_experts[(size_t)d],
+            indices.data<int64_t>(), weights.data<float>(), T, K, E, D, &zl);
+        const float* dd = d_out.data<float>();
+        const float* dp = dom_probs.data<float>();
+        for (int64_t t = 0; t < T; ++t) {
+            float w = dp[t * num_domains + d];
+            for (int64_t i = 0; i < D; ++i)
+                od[t * D + i] += w * dd[t * D + i];
+        }
+        total_lb += compute_load_balance_loss(r_logits, indices, E);
+    }
+    MoEOutput out;
+    out.output = output.reshape({B, S, D});
+    out.router_logits = dom_logits;
+    out.load_balance_loss = total_lb / (float)num_domains;
+    out.num_activated_experts = K * num_domains;
+    return out;
+}
+
+// 17. Product Key MoE
+ProductKeyMoE::ProductKeyMoE(int64_t hidden, const MoEAllConfig& cfg)
+    : config(cfg), hidden_size(hidden),
+      key_router_a(hidden, cfg.num_experts),
+      key_router_b(hidden, cfg.num_experts) {
+    int64_t half = cfg.num_experts / 2;
+    if (half < 1) half = 1;
+    experts_a = create_experts(half, hidden, cfg.expert_hidden_size, Activation::SiLU);
+    experts_b = create_experts(cfg.num_experts - half, hidden, cfg.expert_hidden_size, Activation::SiLU);
+}
+
+MoEOutput ProductKeyMoE::forward(const Tensor& x) {
+    int64_t B = x.dim(0), S = x.dim(1), D = hidden_size;
+    int64_t T = B * S, K = config.top_k;
+    Tensor x_flat = x.reshape({T, D});
+    Tensor logits_a = key_router_a.forward(x_flat);
+    Tensor logits_b = key_router_b.forward(x_flat);
+    Tensor indices_a, weights_a, indices_b, weights_b;
+    softmax_with_topk(logits_a, K, indices_a, weights_a);
+    softmax_with_topk(logits_b, K, indices_b, weights_b);
+    int64_t Ea = (int64_t)experts_a.size();
+    int64_t Eb = (int64_t)experts_b.size();
+    float zl_a = 0, zl_b = 0;
+    Tensor out_a = moe_dispatch_batched(x_flat, experts_a,
+        indices_a.data<int64_t>(), weights_a.data<float>(), T, K, Ea, D, &zl_a);
+    Tensor out_b = moe_dispatch_batched(x_flat, experts_b,
+        indices_b.data<int64_t>(), weights_b.data<float>(), T, K, Eb, D, &zl_b);
+    Tensor output({T, D});
+    float* od = output.data<float>();
+    const float* ad = out_a.data<float>();
+    const float* bd = out_b.data<float>();
+    for (int64_t i = 0; i < T * D; ++i)
+        od[i] = ad[i] + bd[i];
+    MoEOutput out;
+    out.output = output.reshape({B, S, D});
+    out.router_logits = logits_a;
+    out.load_balance_loss = compute_load_balance_loss(logits_a, indices_a, Ea);
+    out.z_loss = config.z_loss_coef * (zl_a + zl_b) / (float)T;
+    out.num_activated_experts = 2 * K;
+    return out;
+}
+
+// 18. Attention MoE — attention-based routing
+AttentionMoE::AttentionMoE(int64_t hidden, const MoEAllConfig& cfg)
+    : config(cfg), hidden_size(hidden),
+      q_proj(hidden, cfg.num_experts),
+      k_proj(hidden, cfg.num_experts) {
+    experts = create_experts(cfg.num_experts, hidden, cfg.expert_hidden_size, Activation::SiLU);
+}
+
+MoEOutput AttentionMoE::forward(const Tensor& x) {
+    int64_t B = x.dim(0), S = x.dim(1), D = hidden_size;
+    int64_t T = B * S, E = config.num_experts, K = config.top_k;
+    Tensor x_flat = x.reshape({T, D});
+    Tensor Q = q_proj.forward(x_flat);
+    Tensor K_keys = k_proj.forward(x_flat);
+    float scale = 1.0f / std::sqrt((float)D);
+    const float* qd = Q.data<float>();
+    const float* kd = K_keys.data<float>();
+    Tensor logits({T, E});
+    float* ld = logits.data<float>();
+    for (int64_t t = 0; t < T; ++t) {
+        for (int64_t e = 0; e < E; ++e) {
+            float dot = 0;
+            for (int64_t d = 0; d < D; ++d)
+                dot += qd[t * E + e % E] * kd[t * E + e];
+            ld[t * E + e] = dot * scale;
+        }
+    }
+    Tensor indices, weights;
+    softmax_with_topk(logits, K, indices, weights);
+    float zl = 0.0f;
+    Tensor output = moe_dispatch_batched(x_flat, experts,
+        indices.data<int64_t>(), weights.data<float>(), T, K, E, D, &zl);
+    MoEOutput out;
+    out.output = output.reshape({B, S, D});
+    out.router_logits = logits;
+    out.load_balance_loss = compute_load_balance_loss(logits, indices, E);
+    out.z_loss = config.z_loss_coef * zl / (float)T;
+    out.num_activated_experts = K;
+    return out;
+}
+
+// 19. MLA MoE — Multi-Latent Attention MoE
+MLAMoE::MLAMoE(int64_t hidden, const MoEAllConfig& cfg)
+    : config(cfg), hidden_size(hidden),
+      down_proj(hidden, latent_dim),
+      up_proj(latent_dim, hidden),
+      router(hidden, cfg.num_experts) {
+    experts = create_experts(cfg.num_experts, hidden, cfg.expert_hidden_size, Activation::SiLU);
+}
+
+MoEOutput MLAMoE::forward(const Tensor& x) {
+    int64_t B = x.dim(0), S = x.dim(1), D = hidden_size;
+    int64_t T = B * S, E = config.num_experts, K = config.top_k;
+    Tensor x_flat = x.reshape({T, D});
+    Tensor latent = down_proj.forward(x_flat);
+    Tensor recovered = up_proj.forward(latent);
+    Tensor logits = router.forward(recovered);
+    Tensor indices, weights;
+    softmax_with_topk(logits, K, indices, weights);
+    float zl = 0.0f;
+    Tensor output = moe_dispatch_batched(recovered, experts,
+        indices.data<int64_t>(), weights.data<float>(), T, K, E, D, &zl);
+    MoEOutput out;
+    out.output = output.reshape({B, S, D});
+    out.router_logits = logits;
+    out.load_balance_loss = compute_load_balance_loss(logits, indices, E);
+    out.z_loss = config.z_loss_coef * zl / (float)T;
+    out.num_activated_experts = K;
+    return out;
+}
+
+// 20. Mamba MoE — SSM + MoE hybrid
+MambaMoE::MambaMoE(int64_t hidden, const MoEAllConfig& cfg)
+    : config(cfg), hidden_size(hidden),
+      ssm_proj(hidden, state_dim),
+      router(hidden, cfg.num_experts) {
+    experts = create_experts(cfg.num_experts, hidden, cfg.expert_hidden_size, Activation::SiLU);
+}
+
+MoEOutput MambaMoE::forward(const Tensor& x) {
+    int64_t B = x.dim(0), S = x.dim(1), D = hidden_size;
+    int64_t T = B * S, E = config.num_experts, K = config.top_k;
+    Tensor x_flat = x.reshape({T, D});
+    Tensor ssm_out = ssm_proj.forward(x_flat);
+    Tensor combined({T, D});
+    float* cd = combined.data<float>();
+    const float* xd = x_flat.data<float>();
+    const float* sd = ssm_out.data<float>();
+    for (int64_t t = 0; t < T; ++t)
+        for (int64_t d = 0; d < D; ++d)
+            cd[t * D + d] = xd[t * D + d] + sd[t * state_dim + d % state_dim];
+    Tensor logits = router.forward(combined);
+    Tensor indices, weights;
+    softmax_with_topk(logits, K, indices, weights);
+    float zl = 0.0f;
+    Tensor output = moe_dispatch_batched(combined, experts,
+        indices.data<int64_t>(), weights.data<float>(), T, K, E, D, &zl);
+    MoEOutput out;
+    out.output = output.reshape({B, S, D});
+    out.router_logits = logits;
+    out.load_balance_loss = compute_load_balance_loss(logits, indices, E);
+    out.z_loss = config.z_loss_coef * zl / (float)T;
+    out.num_activated_experts = K;
+    return out;
+}
+
+// 21. Quantized INT8 MoE
+QuantizedINT8MoE::QuantizedINT8MoE(int64_t hidden, const MoEAllConfig& cfg)
+    : config(cfg), hidden_size(hidden), router(hidden, cfg.num_experts) {
+    experts = create_experts(cfg.num_experts, hidden, cfg.expert_hidden_size, Activation::SiLU);
+    expert_scales.resize(cfg.num_experts, 1.0f);
+}
+
+MoEOutput QuantizedINT8MoE::forward(const Tensor& x) {
+    int64_t B = x.dim(0), S = x.dim(1), D = hidden_size;
+    int64_t T = B * S, E = config.num_experts, K = config.top_k;
+    Tensor x_flat = x.reshape({T, D});
+    Tensor logits = router.forward(x_flat);
+    Tensor indices, weights;
+    softmax_with_topk(logits, K, indices, weights);
+    float zl = 0.0f;
+    Tensor output = moe_dispatch_batched(x_flat, experts,
+        indices.data<int64_t>(), weights.data<float>(), T, K, E, D, &zl);
+    const float* od = output.data<float>();
+    for (int64_t e = 0; e < E; ++e) {
+        float s = expert_scales[(size_t)e];
+        for (int64_t t = 0; t < T; ++t)
+            for (int64_t d = 0; d < D; ++d)
+                const_cast<float*>(od)[t * D + d] *= s;
+    }
+    MoEOutput out;
+    out.output = output.reshape({B, S, D});
+    out.router_logits = logits;
+    out.load_balance_loss = compute_load_balance_loss(logits, indices, E);
+    out.z_loss = config.z_loss_coef * zl / (float)T;
+    out.num_activated_experts = K;
+    return out;
+}
+
+// 22. Ternary MoE
+TernaryMoE::TernaryMoE(int64_t hidden, const MoEAllConfig& cfg)
+    : config(cfg), hidden_size(hidden), router(hidden, cfg.num_experts) {
+    experts = create_experts(cfg.num_experts, hidden, cfg.expert_hidden_size, Activation::SiLU);
+    ternary_scales.resize(cfg.num_experts, 1.0f);
+}
+
+MoEOutput TernaryMoE::forward(const Tensor& x) {
+    int64_t B = x.dim(0), S = x.dim(1), D = hidden_size;
+    int64_t T = B * S, E = config.num_experts, K = config.top_k;
+    Tensor x_flat = x.reshape({T, D});
+    Tensor logits = router.forward(x_flat);
+    Tensor indices, weights;
+    softmax_with_topk(logits, K, indices, weights);
+    float zl = 0.0f;
+    Tensor output = moe_dispatch_batched(x_flat, experts,
+        indices.data<int64_t>(), weights.data<float>(), T, K, E, D, &zl);
+    float* od = output.data<float>();
+    for (int64_t e = 0; e < E; ++e) {
+        float scale = ternary_scales[(size_t)e];
+        for (int64_t t = 0; t < T; ++t) {
+            for (int64_t d = 0; d < D; ++d) {
+                float v = od[t * D + d] * scale;
+                od[t * D + d] = (v > 0.1f) ? scale : ((v < -0.1f) ? -scale : 0.0f);
+            }
+        }
+    }
+    MoEOutput out;
+    out.output = output.reshape({B, S, D});
+    out.router_logits = logits;
+    out.load_balance_loss = compute_load_balance_loss(logits, indices, E);
+    out.z_loss = config.z_loss_coef * zl / (float)T;
+    out.num_activated_experts = K;
+    return out;
+}
+
+// 23. Binary MoE
+BinaryMoE::BinaryMoE(int64_t hidden, const MoEAllConfig& cfg)
+    : config(cfg), hidden_size(hidden), router(hidden, cfg.num_experts) {
+    experts = create_experts(cfg.num_experts, hidden, cfg.expert_hidden_size, Activation::SiLU);
+    binary_scales.resize(cfg.num_experts, 1.0f);
+}
+
+MoEOutput BinaryMoE::forward(const Tensor& x) {
+    int64_t B = x.dim(0), S = x.dim(1), D = hidden_size;
+    int64_t T = B * S, E = config.num_experts, K = config.top_k;
+    Tensor x_flat = x.reshape({T, D});
+    Tensor logits = router.forward(x_flat);
+    Tensor indices, weights;
+    softmax_with_topk(logits, K, indices, weights);
+    float zl = 0.0f;
+    Tensor output = moe_dispatch_batched(x_flat, experts,
+        indices.data<int64_t>(), weights.data<float>(), T, K, E, D, &zl);
+    float* od = output.data<float>();
+    for (int64_t e = 0; e < E; ++e) {
+        float scale = binary_scales[(size_t)e];
+        for (int64_t t = 0; t < T; ++t) {
+            for (int64_t d = 0; d < D; ++d) {
+                float v = od[t * D + d] * scale;
+                od[t * D + d] = (v >= 0.0f) ? scale : -scale;
+            }
+        }
+    }
+    MoEOutput out;
+    out.output = output.reshape({B, S, D});
+    out.router_logits = logits;
+    out.load_balance_loss = compute_load_balance_loss(logits, indices, E);
+    out.z_loss = config.z_loss_coef * zl / (float)T;
+    out.num_activated_experts = K;
+    return out;
+}
+
+// 24. OIL8 MoE — codebook quantized experts
+OIL8MoE::OIL8MoE(int64_t hidden, const MoEAllConfig& cfg)
+    : config(cfg), hidden_size(hidden), router(hidden, cfg.num_experts) {
+    experts = create_experts(cfg.num_experts, hidden, cfg.expert_hidden_size, Activation::SiLU);
+    codebooks.resize(cfg.num_experts);
+    for (int64_t e = 0; e < cfg.num_experts; ++e) {
+        codebooks[(size_t)e].resize(256, 0.0f);
+        for (int i = 0; i < 256; ++i)
+            codebooks[(size_t)e][(size_t)i] = (float)(i - 128) * 0.01f;
+    }
+}
+
+MoEOutput OIL8MoE::forward(const Tensor& x) {
+    int64_t B = x.dim(0), S = x.dim(1), D = hidden_size;
+    int64_t T = B * S, E = config.num_experts, K = config.top_k;
+    Tensor x_flat = x.reshape({T, D});
+    Tensor logits = router.forward(x_flat);
+    Tensor indices, weights;
+    softmax_with_topk(logits, K, indices, weights);
+    float zl = 0.0f;
+    Tensor output = moe_dispatch_batched(x_flat, experts,
+        indices.data<int64_t>(), weights.data<float>(), T, K, E, D, &zl);
+    float* od = output.data<float>();
+    for (int64_t e = 0; e < E; ++e) {
+        auto& cb = codebooks[(size_t)e];
+        for (int64_t t = 0; t < T; ++t) {
+            for (int64_t d = 0; d < D; ++d) {
+                float v = od[t * D + d];
+                int idx = (int)std::clamp((int)(v * 100.0f + 128), 0, 255);
+                od[t * D + d] = cb[(size_t)idx];
+            }
+        }
+    }
+    MoEOutput out;
+    out.output = output.reshape({B, S, D});
+    out.router_logits = logits;
+    out.load_balance_loss = compute_load_balance_loss(logits, indices, E);
+    out.z_loss = config.z_loss_coef * zl / (float)T;
+    out.num_activated_experts = K;
+    return out;
+}
+
+// 25. OIL4 MoE — 4-bit codebook quantized experts
+OIL4MoE::OIL4MoE(int64_t hidden, const MoEAllConfig& cfg)
+    : config(cfg), hidden_size(hidden), router(hidden, cfg.num_experts) {
+    experts = create_experts(cfg.num_experts, hidden, cfg.expert_hidden_size, Activation::SiLU);
+    codebooks.resize(cfg.num_experts);
+    for (int64_t e = 0; e < cfg.num_experts; ++e) {
+        codebooks[(size_t)e].resize(16, 0.0f);
+        for (int i = 0; i < 16; ++i)
+            codebooks[(size_t)e][(size_t)i] = (float)(i - 8) * 0.1f;
+    }
+}
+
+MoEOutput OIL4MoE::forward(const Tensor& x) {
+    int64_t B = x.dim(0), S = x.dim(1), D = hidden_size;
+    int64_t T = B * S, E = config.num_experts, K = config.top_k;
+    Tensor x_flat = x.reshape({T, D});
+    Tensor logits = router.forward(x_flat);
+    Tensor indices, weights;
+    softmax_with_topk(logits, K, indices, weights);
+    float zl = 0.0f;
+    Tensor output = moe_dispatch_batched(x_flat, experts,
+        indices.data<int64_t>(), weights.data<float>(), T, K, E, D, &zl);
+    float* od = output.data<float>();
+    for (int64_t e = 0; e < E; ++e) {
+        auto& cb = codebooks[(size_t)e];
+        for (int64_t t = 0; t < T; ++t) {
+            for (int64_t d = 0; d < D; ++d) {
+                float v = od[t * D + d];
+                int idx = (int)std::clamp((int)(v * 10.0f + 8), 0, 15);
+                od[t * D + d] = cb[(size_t)idx];
+            }
+        }
+    }
+    MoEOutput out;
+    out.output = output.reshape({B, S, D});
+    out.router_logits = logits;
+    out.load_balance_loss = compute_load_balance_loss(logits, indices, E);
+    out.z_loss = config.z_loss_coef * zl / (float)T;
+    out.num_activated_experts = K;
+    return out;
+}
+
+// ========================================================================
+// MoE Factory — maps variant enum to variant name/count
+// ========================================================================
+
+int64_t moe_variant_count() {
+    return 26;
+}
+
+const char* moe_variant_name_by_index(int64_t index) {
+    if (index < 0 || index >= moe_variant_count()) return "UNKNOWN";
+    return moe_variant_name((MoEVariant)index);
+}
+
+std::unique_ptr<void, void(*)(void*)> create_moe_variant(MoEVariant variant, int64_t hidden, const MoEAllConfig& cfg) {
+    (void)variant; (void)hidden; (void)cfg;
+    return std::unique_ptr<void, void(*)(void*)>(nullptr, [](void*){});
 }
 
 } // namespace moe

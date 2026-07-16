@@ -84,6 +84,8 @@ target_link_libraries(oil_tokenizer PUBLIC oil_core)
 
 add_library(oil_trainer
   src/optimizer.cpp
+  src/scheduler.cpp
+  src/eval.cpp
   src/trainer.cpp
   src/ste_quantizer.cpp
   src/finetune.cpp
@@ -230,12 +232,13 @@ endif()
 
 if(OIL_BUILD_TESTS)
   enable_testing()
-  macro(add_oil_test name src deps)
+  function(add_oil_test name src)
     add_executable(${name} ${src})
     target_include_directories(${name} PRIVATE include)
-    target_link_libraries(${name} PRIVATE ${deps})
-    add_test(NAME ${name} COMMAND ${name})
-  endmacro()
+    target_link_libraries(${name} PRIVATE ${ARGN})
+    add_test(NAME ${name} COMMAND $<TARGET_FILE:${name}>)
+    set_tests_properties(${name} PROPERTIES WORKING_DIRECTORY $<TARGET_FILE_DIR:${name}>)
+  endfunction()
   add_oil_test(test_tensor   tests/test_tensor.cpp   oil_core)
   add_oil_test(test_math     tests/test_math.cpp     oil_math)
   add_oil_test(test_format   tests/test_format.cpp   oil_format)
@@ -263,6 +266,7 @@ if(OIL_BUILD_TESTS)
   add_oil_test(test_multimodal   tests/test_multimodal.cpp   oil_multimodal oil_model oil_tokenizer oil_trainer oil_inference)
   add_oil_test(test_production   tests/test_production.cpp   oil_production oil_model oil_tokenizer)
   add_oil_test(test_gradient_check tests/test_gradient_check.cpp oil_trainer oil_model oil_math oil_core)
+  add_oil_test(test_protected tests/test_protected.cpp oil_moe_variants oil_backend oil_trainer oil_tokenizer oil_model oil_kernel oil_format oil_math oil_inference oil_engine)
 endif()
 
 if(OIL_BUILD_BENCHMARKS)
@@ -282,4 +286,7 @@ if(OIL_BUILD_BENCHMARKS)
 
   # Hardware-probe / auto-select benchmark
   add_oil_bench(bench_hardware tests/test_bench.cpp oil_backend oil_math)
+
+  # OIL quantized GEMM benchmarks (Gap #2)
+  add_oil_bench(bench_oil_quant bench/bench_oil_quant.cpp oil_kernel oil_math oil_core)
 endif()

@@ -1,0 +1,3 @@
+# Linux SHA256SUMS placeholder
+# Linux binaries pending build (no Linux/WSL available on this Windows machine)
+# To generate: build on Linux, then run: sha256sum dist/linux/x86_64/* > SHA256SUMS

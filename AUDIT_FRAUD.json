@@ -1,0 +1,79 @@
+{
+  "audit_date": "2026-07-15",
+  "scan_scope": "src/ + include/",
+  "fraud_patterns_scanned": ["return false", "return true", "return 0.5f", "TODO", "STUB", "FIXME", "HACK", "dummy", "empty body", "empty tensor"],
+  "findings": [
+    {
+      "file": "src/gpu_compute.cpp",
+      "line": 924,
+      "pattern": "return false",
+      "severity": "HIGH",
+      "description": "CUDABackend::init() returns false unconditionally - CUDA never initializes",
+      "action": "Implement real CUDA init or mark as optional/no-CUDA build"
+    },
+    {
+      "file": "src/gpu_compute.cpp",
+      "line": 925,
+      "pattern": "return false",
+      "severity": "HIGH",
+      "description": "CUDABackend::is_initialized() returns false - CUDA always reports uninitialized",
+      "action": "Track real init state"
+    },
+    {
+      "file": "src/asi.cpp",
+      "line": 536,
+      "pattern": "return 0.5f",
+      "severity": "MEDIUM",
+      "description": "CapabilityAmplifier::measure() returns 0.5f for unknown capabilities - default fallback",
+      "action": "PHASE C: Replace with real measurement logic"
+    },
+    {
+      "file": "src/asi.cpp",
+      "line": 1030,
+      "pattern": "return 0.5f",
+      "severity": "MEDIUM",
+      "description": "PromptOptimizer::evaluate() returns 0.5f when no model - fallback",
+      "action": "PHASE C: Replace with real evaluation"
+    },
+    {
+      "file": "src/asi.cpp",
+      "line": 1339,
+      "pattern": "return {0.5f, 0.0f, 1}",
+      "severity": "HIGH",
+      "description": "EvaluationHarness::evaluate() returns 85% accuracy fallback when no model - hallucination risk",
+      "action": "PHASE C: Replace with real 100-example evaluation"
+    },
+    {
+      "file": "src/asi.cpp",
+      "line": 863,
+      "pattern": "0.5f",
+      "severity": "LOW",
+      "description": "NeuralArchitectureSearch::search() returns Architecture{12,4096,0.5f} as fallback - dummy score",
+      "action": "PHASE C: Replace with real architecture evaluation"
+    },
+    {
+      "file": "src/backend.cpp",
+      "line": 162,
+      "pattern": "TODO",
+      "severity": "LOW",
+      "description": "AVX-512 implementation TODO comment",
+      "action": "PHASE L: Implement or remove TODO"
+    },
+    {
+      "file": "src/inference_opt.cpp",
+      "line": 996,
+      "pattern": "return 0.5f",
+      "severity": "MEDIUM",
+      "description": "SpeculativeDecoder returns 0.5f acceptance rate when no draft model",
+      "action": "PHASE H: Implement real draft model"
+    }
+  ],
+  "summary": {
+    "total_findings": 8,
+    "critical": 0,
+    "high": 3,
+    "medium": 3,
+    "low": 2,
+    "verdict": "No critical fraud stubs found. 3 HIGH findings need fixing in PHASE C/H/L."
+  }
+}

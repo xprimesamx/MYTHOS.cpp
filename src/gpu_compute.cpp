@@ -18,6 +18,33 @@
 #include <mutex>
 #include <new>
 
+#ifdef OIL_HAS_CUDA
+extern "C" {
+void launch_cuda_softmax(float* y, const float* x, int rows, int cols);
+void launch_cuda_layernorm(float* y, const float* x, const float* gamma,
+                           const float* beta, float eps, int n, int d);
+void launch_cuda_rmsnorm(float* y, const float* x, const float* gamma,
+                         float eps, int n, int d);
+void launch_cuda_relu(float* y, const float* x, int n);
+void launch_cuda_gelu(float* y, const float* x, int n);
+void launch_cuda_silu(float* y, const float* x, int n);
+void launch_cuda_add(float* c, const float* a, const float* b, int n);
+void launch_cuda_mul(float* c, const float* a, const float* b, int n);
+void launch_cuda_scale(float* y, const float* x, float s, int n);
+void launch_cuda_embedding(float* out, const float* table,
+                           const int* indices, int B, int S, int D);
+void launch_cuda_moe_gather(float* out, const float* x,
+                            const int64_t* indices, const float* weights,
+                            int T, int K, int D);
+void launch_cuda_flash_attention(float* out, const float* Q, const float* K,
+                                 const float* V, int B, int H, int N, int D,
+                                 int block_size, bool causal);
+void launch_cuda_flash_attention_causal(float* out, const float* Q,
+                                        const float* K, const float* V,
+                                        int B, int H, int N, int D);
+}
+#endif
+
 using namespace Microsoft::WRL;
 
 // ========================================================================
@@ -943,6 +970,7 @@ void CUDABackend::rms_norm(const void*, const void*, void*, float, int64_t, int6
 void CUDABackend::layer_norm(const void*, const void*, const void*, void*, float, int64_t, int64_t) {}
 void CUDABackend::moe_gather(const void*, const int64_t*, const float*, void*, int64_t, int64_t, int64_t) {}
 void CUDABackend::moe_scatter_add(void*, const int64_t*, const float*, const void*, int64_t, int64_t, int64_t) {}
+void CUDABackend::flash_attention(void*, const void*, const void*, const void*, int64_t, int64_t, int64_t, int64_t, bool) {}
 void CUDABackend::synchronize() {}
 int64_t CUDABackend::memory_free() const { return 0; }
 int64_t CUDABackend::memory_total() const { return 0; }

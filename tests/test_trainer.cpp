@@ -434,6 +434,53 @@ int main() {
         }
     }
 
+    // Test overfit 32 tokens: loss should decrease significantly over 100 steps
+    {
+        oil::TransformerConfig ovr_cfg;
+        ovr_cfg.vocab_size = 64;
+        ovr_cfg.hidden_size = 32;
+        ovr_cfg.num_layers = 2;
+        ovr_cfg.num_heads = 4;
+        ovr_cfg.head_dim = ovr_cfg.hidden_size / ovr_cfg.num_heads;
+        ovr_cfg.ffn_hidden_size = 64;
+        ovr_cfg.norm_eps = 1e-5f;
+        ovr_cfg.max_seq_len = 32;
+
+        oil::DenseModel ovr_model(ovr_cfg);
+        oil::BPETokenizer ovr_tok;
+        oil::Trainer ovr_trainer(&ovr_model, &ovr_tok);
+        oil::AdamW ovr_opt(1e-2f);
+        ovr_trainer.compile(&ovr_opt);
+
+        const int64_t B = 1;
+        const int64_t S = 32;
+
+        oil::Tensor fixed_input(oil::Shape{B, S}, oil::DType::F32);
+        oil::Tensor fixed_labels(oil::Shape{B, S}, oil::DType::F32);
+        for (int64_t i = 0; i < B * S; i++) {
+            fixed_input.data<float>()[i] = (float)((i * 7 + 3) % (ovr_cfg.vocab_size - 1) + 1);
+            fixed_labels.data<float>()[i] = (float)((i * 13 + 5) % ovr_cfg.vocab_size);
+        }
+
+        float initial_loss = ovr_trainer.train_step(fixed_input, fixed_labels);
+        std::cout << "Overfit test: initial loss = " << initial_loss << std::endl;
+        assert(std::isfinite(initial_loss));
+
+        float final_loss = initial_loss;
+        for (int step = 0; step < 100; step++) {
+            final_loss = ovr_trainer.train_step(fixed_input, fixed_labels);
+            assert(std::isfinite(final_loss));
+            assert(!std::isnan(final_loss));
+        }
+
+        std::cout << "Overfit test: final loss after 100 steps = " << final_loss << std::endl;
+        std::cout << "Overfit test: loss reduction = " << (initial_loss - final_loss) << std::endl;
+
+        assert(final_loss < initial_loss);
+        std::cout << "Overfit test PASSED: loss decreased from " << initial_loss
+                  << " to " << final_loss << std::endl;
+    }
+
     std::cout << "All trainer tests passed!" << std::endl;
     return 0;
 }

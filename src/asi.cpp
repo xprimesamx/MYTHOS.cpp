@@ -105,9 +105,9 @@ float SelfMonitor::estimate_confidence(const Tensor& logits) {
 MetaCognitionState SelfMonitor::analyze(const std::string& input, const std::string& output) {
     MetaCognitionState state;
     if (!model_) {
-        state.confidence = 0.5f;
-        state.uncertainty = 0.5f;
-        state.token_confidences = {0.5f};
+        state.confidence = 0.0f;
+        state.uncertainty = 1.0f;
+        state.token_confidences = {0.0f};
         state.recommendation = "no model";
         state.needs_reanalysis = false;
         state.reasoning_depth = 1;
@@ -204,7 +204,19 @@ RecursiveSelfImprover::RecursiveSelfImprover(Model* model, Trainer* trainer)
 
 void RecursiveSelfImprover::improvement_cycle(int iterations) {
     if (!model_) return;
+
+    int64_t orig_hidden = model_->config.hidden_size;
+    int64_t orig_layers = model_->config.num_layers;
+    int no_improvement_count = 0;
+    float best_perplexity = 1e10f;
+
     for (int i = 0; i < iterations && i < AlignmentSystem::max_loop_iterations; i++) {
+        if (no_improvement_count >= 10) {
+            model_->config.hidden_size = orig_hidden;
+            model_->config.num_layers = orig_layers;
+            break;
+        }
+
         int vocab_size = (int)model_->config.vocab_size;
 
         std::string test_input = "Self-evaluation test input iteration " + std::to_string(i);
@@ -238,13 +250,24 @@ void RecursiveSelfImprover::improvement_cycle(int iterations) {
         }
         float perplexity = std::exp(loss / std::max(1, count));
 
+        if (perplexity < best_perplexity) {
+            best_perplexity = perplexity;
+            no_improvement_count = 0;
+        } else {
+            no_improvement_count++;
+        }
+
         std::string analysis = "iteration=" + std::to_string(i) +
             "|perplexity=" + std::to_string(perplexity) +
             "|vocab_size=" + std::to_string(vocab_size) +
             "|hidden_size=" + std::to_string(model_->config.hidden_size) +
             "|num_layers=" + std::to_string(model_->config.num_layers);
 
-        if (!self_modify(analysis)) break;
+        if (!self_modify(analysis)) {
+            model_->config.hidden_size = orig_hidden;
+            model_->config.num_layers = orig_layers;
+            break;
+        }
     }
 }
 
@@ -533,11 +556,45 @@ float CapabilityAmplifier::measure(const std::string& capability) {
         return 0.3f;
     }
 
-    return 0.5f;
+    if (capability == "language") {
+        std::string prompt = "Translate to French: Hello world.";
+        auto ids = simple_encode(prompt, vocab_size);
+        auto gen = generate_new_tokens(model_, ids, vocab_size, 20);
+        std::string answer = simple_decode(gen);
+        return answer.size() > 5 ? 0.6f : 0.2f;
+    }
+
+    if (capability == "instruction_following") {
+        std::string tests[] = {
+            "List three fruits.",
+            "What is the opposite of hot?",
+            "Count from 1 to 5."
+        };
+        float correct = 0;
+        for (auto& t : tests) {
+            auto ids = simple_encode(t, vocab_size);
+            auto gen = generate_new_tokens(model_, ids, vocab_size, 15);
+            std::string answer = simple_decode(gen);
+            if (!answer.empty()) correct += 1.0f;
+        }
+        return correct / 3.0f;
+    }
+
+    if (capability == "creativity") {
+        std::string prompt = "Write a short poem about the ocean.";
+        auto ids = simple_encode(prompt, vocab_size);
+        auto gen = generate_new_tokens(model_, ids, vocab_size, 40);
+        std::string poem = simple_decode(gen);
+        int words = 0;
+        for (char c : poem) if (c == ' ') words++;
+        return std::min(1.0f, (float)words / 20.0f);
+    }
+
+    return 0.0f;
 }
 
 bool CapabilityAmplifier::improve(const std::string& capability, int steps) {
-    if (!model_) return true;
+    if (!model_) return false;
     int vocab_size = (int)model_->config.vocab_size;
 
     std::string training_prompt;
@@ -860,7 +917,7 @@ NeuralArchitectureSearch::Architecture NeuralArchitectureSearch::search(int popu
 
     std::sort(pop.begin(), pop.end(),
               [](auto& a, auto& b) { return a.score > b.score; });
-    return pop.empty() ? Architecture{12, 4096, 0.5f} : pop[0];
+    return pop.empty() ? Architecture{12, 4096, 0.0f} : pop[0];
 }
 
 // ========================================================================
@@ -1027,7 +1084,7 @@ void KnowledgeDistillation::distill(const DataLoader& data, int steps) {
 PromptOptimizer::PromptOptimizer(Model* model) : model_(model) {}
 
 float PromptOptimizer::evaluate(const std::string& prompt, const std::string& task) {
-    if (!model_) return 0.5f;
+    if (!model_) return 0.0f;
     int vocab_size = (int)model_->config.vocab_size;
     std::string full = prompt + "\n" + task;
     auto ids = simple_encode(full, vocab_size);
@@ -1309,7 +1366,7 @@ std::vector<PlanningEngine::PlanStep> PlanningEngine::plan(const std::string& go
 }
 
 bool PlanningEngine::execute(const std::vector<PlanStep>& plan) {
-    if (!model_) return true;
+    if (!model_) return false;
     int vocab_size = (int)model_->config.vocab_size;
 
     for (size_t i = 0; i < plan.size(); i++) {
@@ -1336,7 +1393,7 @@ bool PlanningEngine::execute(const std::vector<PlanStep>& plan) {
 EvaluationHarness::EvaluationHarness(Model* model) : model_(model) {}
 
 EvaluationHarness::Result EvaluationHarness::evaluate(const std::string& benchmark_name, int n_samples) {
-    if (!model_) return {0.5f, 0.0f, 1};
+    if (!model_) return {0.0f, 0.0f, 0};
     int vocab_size = (int)model_->config.vocab_size;
 
     // Define test cases for different benchmarks (hardcoded mini-test sets)

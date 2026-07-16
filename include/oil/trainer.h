@@ -140,6 +140,73 @@ private:
     CurriculumState cur_state_;
 };
 
+// Standalone Exponential Moving Average of model parameters (Task 122 / EMA R-Drop).
+class ModelEMA {
+public:
+    ModelEMA(const std::vector<Tensor*>& params, float decay = 0.999f)
+        : params_(params), decay_(decay) {
+        for (auto* p : params_) shadow_.push_back(p->clone());
+    }
+
+    void update() {
+        for (size_t i = 0; i < params_.size(); i++) {
+            float* e = shadow_[i].data<float>();
+            const float* p = params_[i]->data<float>();
+            int64_t n = params_[i]->numel();
+            for (int64_t j = 0; j < n; j++)
+                e[j] = decay_ * e[j] + (1.0f - decay_) * p[j];
+        }
+    }
+
+    void apply() const {
+        for (size_t i = 0; i < params_.size(); i++)
+            std::memcpy(params_[i]->data<float>(), shadow_[i].data<float>(),
+                        params_[i]->numel() * sizeof(float));
+    }
+
+    void swap() {
+        for (size_t i = 0; i < params_.size(); i++) {
+            float* p = params_[i]->data<float>();
+            float* e = shadow_[i].data<float>();
+            int64_t n = params_[i]->numel();
+            for (int64_t j = 0; j < n; j++) std::swap(p[j], e[j]);
+        }
+    }
+
+    float decay() const { return decay_; }
+    void set_decay(float d) { decay_ = d; }
+    const std::vector<Tensor>& shadow() const { return shadow_; }
+
+private:
+    std::vector<Tensor*> params_;
+    std::vector<Tensor> shadow_;
+    float decay_;
+};
+
+// Streaming DataLoader (Task 118): yields batches from a file by tokenizing
+// fixed-size chunks on demand, never loading the whole file into memory.
+class StreamingDataLoader {
+public:
+    StreamingDataLoader(Tokenizer* tokenizer, const std::string& data_path,
+                       int64_t batch_size, int64_t seq_length);
+    bool next_batch(Tensor& input_ids, Tensor& labels);
+    void reset();
+    int64_t num_batches() const { return num_batches_; }
+    int64_t batch_size() const { return batch_size_; }
+    int64_t seq_length() const { return seq_length_; }
+
+private:
+    Tokenizer* tokenizer_;
+    int64_t batch_size_;
+    int64_t seq_length_;
+    std::ifstream file_;
+    std::vector<int> buffer_;      // rolling token buffer
+    int64_t num_batches_ = 0;
+    int64_t chunk_bytes_ = 1 << 20;  // 1 MiB read per chunk
+    bool eof_ = false;
+    void fill_buffer();
+};
+
 struct TrainMetrics {
     float loss = 0;
     float perplexity = 0;
@@ -189,6 +256,12 @@ public:
     
     // C14: Enhanced mixed precision
     void dynamic_loss_scale(float grad_norm, float max_grad_norm);
+
+    // Task 121: master FP32 weights + FP16 forward
+    void init_mixed_precision();
+    void mp_quantize_forward();   // snapshot FP32 master, quantize model weights to FP16
+    void mp_restore_master();     // restore FP32 master weights for optimizer step
+    bool mixed_precision_active() const { return mp_active_; }
     
     // C17: Label smoothing cross-entropy
     Tensor label_smoothing_loss(const Tensor& logits, const Tensor& labels, float smoothing);
@@ -215,6 +288,10 @@ private:
     std::vector<Tensor> ema_params_;
     float ema_decay_ = 0.999f;
     bool ema_enabled_ = false;
+
+    // Task 121: master FP32 weight copies for mixed precision
+    std::vector<Tensor> mp_master_;
+    bool mp_active_ = false;
 };
 
 } // namespace oil

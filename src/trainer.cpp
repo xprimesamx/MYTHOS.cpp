@@ -349,6 +349,63 @@ int64_t DataLoader::num_batches() const {
 }
 
 // ===========================================================================
+// StreamingDataLoader (Task 118)
+// ===========================================================================
+
+StreamingDataLoader::StreamingDataLoader(Tokenizer* tokenizer, const std::string& data_path,
+                                         int64_t batch_size, int64_t seq_length)
+    : tokenizer_(tokenizer), batch_size_(batch_size), seq_length_(seq_length) {
+    file_.open(data_path, std::ios::binary);
+    if (!file_.is_open()) { num_batches_ = 0; return; }
+    file_.seekg(0, std::ios::end);
+    int64_t file_size = (int64_t)file_.tellg();
+    file_.seekg(0);
+    int64_t approx_tokens = file_size / 4;     // ~4 bytes per token estimate
+    int64_t tokens_per_batch = batch_size_ * seq_length_;
+    num_batches_ = (std::max)(approx_tokens / tokens_per_batch, (int64_t)1);
+    fill_buffer();
+}
+
+void StreamingDataLoader::fill_buffer() {
+    if (eof_) return;
+    std::string chunk;
+    chunk.resize(chunk_bytes_);
+    file_.read(&chunk[0], chunk_bytes_);
+    size_t got = (size_t)file_.gcount();
+    if (got == 0) { eof_ = true; return; }
+    chunk.resize(got);
+    auto toks = tokenizer_->encode(chunk);
+    buffer_.insert(buffer_.end(), toks.begin(), toks.end());
+}
+
+bool StreamingDataLoader::next_batch(Tensor& input_ids, Tensor& labels) {
+    int64_t need = batch_size_ * seq_length_;
+    while ((int64_t)buffer_.size() < need + 1) {
+        if (eof_) return false;
+        fill_buffer();
+        if (eof_ && (int64_t)buffer_.size() < need + 1) return false;
+    }
+    float* id = input_ids.data<float>();
+    float* ld = labels.data<float>();
+    for (int64_t i = 0; i < need; i++) {
+        id[i] = (float)buffer_[i];
+        ld[i] = (float)buffer_[i + 1];
+    }
+    buffer_.erase(buffer_.begin(), buffer_.begin() + need);
+    return true;
+}
+
+void StreamingDataLoader::reset() {
+    if (file_.is_open()) {
+        file_.clear();
+        file_.seekg(0);
+    }
+    buffer_.clear();
+    eof_ = false;
+    fill_buffer();
+}
+
+// ===========================================================================
 // Trainer
 // ===========================================================================
 
@@ -371,6 +428,13 @@ void Trainer::compile(AdamW* opt, const TrainConfig& cfg) {
     opt->set_weight_decay(cfg.weight_decay);
     loss_scale_ = cfg.mixed_precision ? cfg.loss_scale : 1.0f;
     loss_scale_interval_ = cfg.loss_scale_interval;
+    if (cfg.mixed_precision) init_mixed_precision();
+}
+
+void Trainer::init_mixed_precision() {
+    // Initialize mixed precision training state
+    loss_scale_ = loss_scale_ > 0.0f ? loss_scale_ : 1024.0f;
+    steps_since_scale_update_ = 0;
 }
 
 float Trainer::eval_loss(DataLoader& val_dl, int64_t max_batches) {

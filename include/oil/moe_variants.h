@@ -30,7 +30,22 @@ enum class MoEVariant {
     CROSS_LAYER,
     MULTIMODAL,          // Our MoMMoE
     MMOE,                // Multi-gate MoE
-    DEEPSEEK_MOE         // DeepSeek-MoE (shared + routed)
+    DEEPSEEK_MOE,        // DeepSeek-MoE (shared + routed)
+    BASE_LAYER,          // BASE Layer MoE
+    DENSE_MOE,           // Dense MoE (all experts active)
+    SHARED_EXPERT,       // Shared Expert MoE (standalone)
+    RESIDUAL_MOE,        // Residual MoE (overflow via residual)
+    GATING_DROPOUT,      // Gating Dropout MoE
+    DOMAIN_MOE,          // Domain-specialized MoE
+    PRODUCT_KEY,         // Product Key MoE (large vocab via product keys)
+    ATTENTION_MOE,       // Attention-based MoE routing
+    MLA_MOE,             // Multi-Latent Attention MoE (DeepSeek MLA)
+    MAMBA_MOE,           // Mamba (SSM) + MoE hybrid
+    QUANTIZED_INT8_MOE,  // INT8 quantized experts
+    TERNARY_MOE,         // Ternary {-1,0,+1} quantized experts
+    BINARY_MOE,           // Binary {-1,+1} quantized experts
+    OIL8_MOE,            // OIL8 codebook quantized experts
+    OIL4_MOE             // OIL4 codebook quantized experts
 };
 
 inline const char* moe_variant_name(MoEVariant v) {
@@ -47,6 +62,21 @@ inline const char* moe_variant_name(MoEVariant v) {
         case MoEVariant::MULTIMODAL: return "MULTIMODAL";
         case MoEVariant::MMOE: return "MMOE";
         case MoEVariant::DEEPSEEK_MOE: return "DEEPSEEK_MOE";
+        case MoEVariant::BASE_LAYER: return "BASE_LAYER";
+        case MoEVariant::DENSE_MOE: return "DENSE_MOE";
+        case MoEVariant::SHARED_EXPERT: return "SHARED_EXPERT";
+        case MoEVariant::RESIDUAL_MOE: return "RESIDUAL_MOE";
+        case MoEVariant::GATING_DROPOUT: return "GATING_DROPOUT";
+        case MoEVariant::DOMAIN_MOE: return "DOMAIN_MOE";
+        case MoEVariant::PRODUCT_KEY: return "PRODUCT_KEY";
+        case MoEVariant::ATTENTION_MOE: return "ATTENTION_MOE";
+        case MoEVariant::MLA_MOE: return "MLA_MOE";
+        case MoEVariant::MAMBA_MOE: return "MAMBA_MOE";
+        case MoEVariant::QUANTIZED_INT8_MOE: return "QUANTIZED_INT8_MOE";
+        case MoEVariant::TERNARY_MOE: return "TERNARY_MOE";
+        case MoEVariant::BINARY_MOE: return "BINARY_MOE";
+        case MoEVariant::OIL8_MOE: return "OIL8_MOE";
+        case MoEVariant::OIL4_MOE: return "OIL4_MOE";
         default: return "UNKNOWN";
     }
 }
@@ -346,8 +376,239 @@ public:
 };
 
 // ========================================================================
-// Load balancing utility (shared by all variants)
+// 11. BASE Layer MoE — minimal MoE with single router + experts
 // ========================================================================
+
+class BaseLayerMoE {
+public:
+    BaseLayerMoE(int64_t hidden_size, const MoEAllConfig& cfg);
+    MoEOutput forward(const Tensor& x, bool training = true);
+    std::vector<ExpertFFN> experts;
+    Linear router;
+    MoEAllConfig config;
+    int64_t hidden_size;
+};
+
+// ========================================================================
+// 12. Dense MoE — all experts active, weighted sum
+// ========================================================================
+
+class DenseMoE {
+public:
+    DenseMoE(int64_t hidden_size, const MoEAllConfig& cfg);
+    MoEOutput forward(const Tensor& x);
+    std::vector<ExpertFFN> experts;
+    Linear gate;
+    MoEAllConfig config;
+    int64_t hidden_size;
+};
+
+// ========================================================================
+// 13. Shared Expert MoE — standalone shared expert + routed experts
+// ========================================================================
+
+class SharedExpertMoE {
+public:
+    SharedExpertMoE(int64_t hidden_size, const MoEAllConfig& cfg);
+    MoEOutput forward(const Tensor& x, bool training = true);
+    ExpertFFN shared_expert;
+    std::vector<ExpertFFN> routed_experts;
+    Linear router;
+    MoEAllConfig config;
+    int64_t hidden_size;
+};
+
+// ========================================================================
+// 14. Residual MoE — overflow tokens pass through residual
+// ========================================================================
+
+class ResidualMoE {
+public:
+    ResidualMoE(int64_t hidden_size, const MoEAllConfig& cfg);
+    MoEOutput forward(const Tensor& x);
+    std::vector<ExpertFFN> experts;
+    Linear router;
+    MoEAllConfig config;
+    int64_t hidden_size;
+};
+
+// ========================================================================
+// 15. Gating Dropout MoE — dropout on gating weights during training
+// ========================================================================
+
+class GatingDropoutMoE {
+public:
+    GatingDropoutMoE(int64_t hidden_size, const MoEAllConfig& cfg);
+    MoEOutput forward(const Tensor& x, bool training = true);
+    std::vector<ExpertFFN> experts;
+    Linear router;
+    MoEAllConfig config;
+    int64_t hidden_size;
+    float dropout_rate = 0.1f;
+};
+
+// ========================================================================
+// 16. Domain MoE — domain-specialized expert groups
+// ========================================================================
+
+class DomainMoE {
+public:
+    DomainMoE(int64_t hidden_size, const MoEAllConfig& cfg);
+    MoEOutput forward(const Tensor& x, int64_t domain_id = -1);
+    std::vector<std::vector<ExpertFFN>> domain_experts;
+    std::vector<Linear> domain_routers;
+    Linear domain_classifier;
+    MoEAllConfig config;
+    int64_t hidden_size;
+    int64_t num_domains = 4;
+};
+
+// ========================================================================
+// 17. Product Key MoE — large effective expert count via product keys
+// ========================================================================
+
+class ProductKeyMoE {
+public:
+    ProductKeyMoE(int64_t hidden_size, const MoEAllConfig& cfg);
+    MoEOutput forward(const Tensor& x);
+    std::vector<ExpertFFN> experts_a;
+    std::vector<ExpertFFN> experts_b;
+    Linear key_router_a;
+    Linear key_router_b;
+    MoEAllConfig config;
+    int64_t hidden_size;
+};
+
+// ========================================================================
+// 18. Attention MoE — attention-based routing
+// ========================================================================
+
+class AttentionMoE {
+public:
+    AttentionMoE(int64_t hidden_size, const MoEAllConfig& cfg);
+    MoEOutput forward(const Tensor& x);
+    std::vector<ExpertFFN> experts;
+    Linear q_proj;
+    Linear k_proj;
+    MoEAllConfig config;
+    int64_t hidden_size;
+};
+
+// ========================================================================
+// 19. MLA MoE — Multi-Latent Attention MoE (DeepSeek-V2 style)
+// ========================================================================
+
+class MLAMoE {
+public:
+    MLAMoE(int64_t hidden_size, const MoEAllConfig& cfg);
+    MoEOutput forward(const Tensor& x);
+    std::vector<ExpertFFN> experts;
+    Linear down_proj;
+    Linear up_proj;
+    Linear router;
+    MoEAllConfig config;
+    int64_t hidden_size;
+    int64_t latent_dim = 256;
+};
+
+// ========================================================================
+// 20. Mamba MoE — Mamba SSM + MoE hybrid
+// ========================================================================
+
+class MambaMoE {
+public:
+    MambaMoE(int64_t hidden_size, const MoEAllConfig& cfg);
+    MoEOutput forward(const Tensor& x);
+    std::vector<ExpertFFN> experts;
+    Linear ssm_proj;
+    Linear router;
+    MoEAllConfig config;
+    int64_t hidden_size;
+    int64_t state_dim = 64;
+};
+
+// ========================================================================
+// 21. Quantized INT8 MoE — INT8 per-expert weight quantization
+// ========================================================================
+
+class QuantizedINT8MoE {
+public:
+    QuantizedINT8MoE(int64_t hidden_size, const MoEAllConfig& cfg);
+    MoEOutput forward(const Tensor& x);
+    std::vector<ExpertFFN> experts;
+    std::vector<float> expert_scales;
+    Linear router;
+    MoEAllConfig config;
+    int64_t hidden_size;
+};
+
+// ========================================================================
+// 22. Ternary MoE — ternary {-1,0,+1} quantized expert weights
+// ========================================================================
+
+class TernaryMoE {
+public:
+    TernaryMoE(int64_t hidden_size, const MoEAllConfig& cfg);
+    MoEOutput forward(const Tensor& x);
+    std::vector<ExpertFFN> experts;
+    std::vector<float> ternary_scales;
+    Linear router;
+    MoEAllConfig config;
+    int64_t hidden_size;
+};
+
+// ========================================================================
+// 23. Binary MoE — binary {-1,+1} quantized expert weights
+// ========================================================================
+
+class BinaryMoE {
+public:
+    BinaryMoE(int64_t hidden_size, const MoEAllConfig& cfg);
+    MoEOutput forward(const Tensor& x);
+    std::vector<ExpertFFN> experts;
+    std::vector<float> binary_scales;
+    Linear router;
+    MoEAllConfig config;
+    int64_t hidden_size;
+};
+
+// ========================================================================
+// 24. OIL8 MoE — OIL8 codebook quantized expert weights
+// ========================================================================
+
+class OIL8MoE {
+public:
+    OIL8MoE(int64_t hidden_size, const MoEAllConfig& cfg);
+    MoEOutput forward(const Tensor& x);
+    std::vector<ExpertFFN> experts;
+    std::vector<std::vector<float>> codebooks;
+    Linear router;
+    MoEAllConfig config;
+    int64_t hidden_size;
+};
+
+// ========================================================================
+// 25. OIL4 MoE — OIL4 codebook quantized expert weights
+// ========================================================================
+
+class OIL4MoE {
+public:
+    OIL4MoE(int64_t hidden_size, const MoEAllConfig& cfg);
+    MoEOutput forward(const Tensor& x);
+    std::vector<ExpertFFN> experts;
+    std::vector<std::vector<float>> codebooks;
+    Linear router;
+    MoEAllConfig config;
+    int64_t hidden_size;
+};
+
+// ========================================================================
+// MoE Factory — maps variant name string to creator
+// ========================================================================
+
+std::unique_ptr<void, void(*)(void*)> create_moe_variant(MoEVariant variant, int64_t hidden, const MoEAllConfig& cfg);
+int64_t moe_variant_count();
+const char* moe_variant_name_by_index(int64_t index);
 
 float compute_load_balance_loss(const Tensor& router_logits, const Tensor& expert_indices, int64_t num_experts);
 float compute_z_loss(const Tensor& expert_output_norms);

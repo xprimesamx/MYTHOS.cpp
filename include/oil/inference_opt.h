@@ -17,15 +17,20 @@ namespace oil {
 class PagedAttention {
 public:
     struct Block { int64_t id; Tensor k; Tensor v; bool active; };
-    PagedAttention(int64_t head_dim, int64_t n_heads, int64_t block_size = 32);
+    PagedAttention(int64_t head_dim, int64_t n_heads, int64_t block_size = 32,
+                   int64_t max_blocks = 256);
     Tensor forward(const Tensor& Q, int64_t* block_table,
                    Block* blocks, int64_t num_blocks);
     Block alloc_block();
     void free_block(int64_t id);
+    int64_t num_blocks() const { return (int64_t)blocks_.size(); }
+    int64_t available_blocks() const { return (int64_t)free_ids_.size(); }
 private:
     int64_t head_dim_, n_heads_, block_size_;
     std::vector<Block> blocks_;
     std::queue<int64_t> free_ids_;
+    int64_t max_blocks_;
+    int64_t next_id_;
 };
 
 // D2: Speculative decoding — draft model + verify
@@ -34,6 +39,8 @@ public:
     SpeculativeDecoder(Model* draft, Model* target, float gamma = 5.0f);
     std::vector<int> generate(const std::vector<int>& prompt, int max_tokens);
     float acceptance_rate() const { return acceptance_rate_; }
+    int accepted_count() const { return accepted_count_; }
+    int total_count() const { return total_count_; }
 private:
     Model* draft_;
     Model* target_;

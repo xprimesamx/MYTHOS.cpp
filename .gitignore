@@ -45,3 +45,20 @@ _test_checkpoint.oil.opt
 
 # Template artifacts (unused)
 .bitnet/
+
+# External model formats — must use adapters::import_xxx
+*.bin
+*.gguf
+*.ggml
+*.safetensors
+*.lora
+*.pt
+*.ckpt
+# Allow dist/ (binary release)
+!dist/
+
+# Checkpoints
+checkpoints/
+
+# Kilo temp
+.kilo/tmp/

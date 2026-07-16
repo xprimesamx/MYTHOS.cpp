@@ -89,4 +89,60 @@ private:
     mutable std::vector<FormatBlockEntry> cached_ft_;
 };
 
+// ===========================================================================
+// OIL Idx — SHA256 integrity-checked index file format
+// Header: magic "MYTHOSIDX" | version | num_tensors
+// Then for each tensor: name_len | name bytes | sha256(name) [32 bytes]
+// On read, each tensor name is re-hashed and compared fail-fast; the first
+// corrupt name is reported by name.
+// ===========================================================================
+
+struct SHA256Hash {
+    uint8_t bytes[32];
+};
+
+struct IdxTensorEntry {
+    std::string name;
+    SHA256Hash name_hash;   // sha256(name) stored in file
+};
+
+class OILIdxWriter {
+public:
+    explicit OILIdxWriter(const std::string& path);
+    ~OILIdxWriter();
+
+    // Writes the full idx file: header magic "MYTHOSIDX", version,
+    // num_tensors, then per-tensor name + computed sha256(name).
+    void write_idx(uint32_t version, const std::vector<std::string>& tensor_names);
+
+    void close();
+
+private:
+    std::ofstream file_;
+};
+
+class OILIdxReader {
+public:
+    explicit OILIdxReader(const std::string& path);
+    ~OILIdxReader();
+
+    // Reads the idx file and recomputes sha256 for every stored tensor name.
+    // On the first mismatch throws oil::Error naming the corrupt tensor.
+    // Returns the verified list of tensor names on success.
+    std::vector<std::string> read_idx();
+
+    bool valid() const { return data_ != nullptr; }
+    uint32_t version() const { return version_; }
+    uint32_t num_tensors() const { return num_tensors_; }
+
+private:
+    MappedFile* mapped_file_;
+    const uint8_t* data_;
+    size_t file_size_;
+    uint32_t version_;
+    uint32_t num_tensors_;
+    bool checked_;
+    std::vector<std::string> names_;
+};
+
 } // namespace oil

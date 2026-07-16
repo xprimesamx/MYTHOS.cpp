@@ -164,4 +164,76 @@ private:
     float temperature_;
 };
 
+// H16: Perceiver — learned query-based cross-attention
+class Perceiver {
+public:
+    Perceiver(int64_t hidden, int64_t num_queries, int64_t num_heads);
+    Tensor forward(const Tensor& input, const Tensor& queries);
+private:
+    int64_t hidden_;
+    int64_t num_queries_;
+    Linear q_proj;
+    Linear k_proj;
+    Linear v_proj;
+    Linear out_proj;
+};
+
+// H17: Vision MoE — modality-specific MoE for vision tokens
+class VisionMoE {
+public:
+    VisionMoE(int64_t hidden, int64_t num_experts = 4);
+    Tensor forward(const Tensor& image_features);
+private:
+    int64_t hidden_;
+    std::vector<FFN> experts;
+    Linear router;
+};
+
+// H18: Audio MoE — modality-specific MoE for audio tokens
+class AudioMoE {
+public:
+    AudioMoE(int64_t hidden, int64_t num_experts = 4);
+    Tensor forward(const Tensor& audio_features);
+private:
+    int64_t hidden_;
+    std::vector<FFN> experts;
+    Linear router;
+};
+
+// H19: Vision+Text MoE — cross-modal routing
+class VisionTextMoE {
+public:
+    VisionTextMoE(int64_t hidden, int64_t num_experts = 6);
+    Tensor forward(const Tensor& vision_tokens, const Tensor& text_tokens);
+private:
+    int64_t hidden_;
+    std::vector<FFN> experts;
+    Linear router;
+    Linear modality_bias;
+};
+
+// H20: Audio+Text MoE — cross-modal routing
+class AudioTextMoE {
+public:
+    AudioTextMoE(int64_t hidden, int64_t num_experts = 6);
+    Tensor forward(const Tensor& audio_tokens, const Tensor& text_tokens);
+private:
+    int64_t hidden_;
+    std::vector<FFN> experts;
+    Linear router;
+    Linear modality_bias;
+};
+
+// H21: All Modality MoE — routes across all modalities
+class AllModalityMoE {
+public:
+    AllModalityMoE(int64_t hidden, int64_t num_experts = 8);
+    Tensor forward(const std::vector<Tensor>& modality_tokens);
+private:
+    int64_t hidden_;
+    std::vector<FFN> experts;
+    Linear router;
+    Linear modality_classifier;
+};
+
 } // namespace oil

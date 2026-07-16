@@ -1,0 +1,68 @@
+{
+  "source": "TASKS.md v5.0",
+  "parsed_date": "2026-07-15",
+  "section_1_metrics": {
+    "total_cpp_loc": 15450,
+    "total_h_loc": 3580,
+    "total_cu_loc": 521,
+    "total_source_loc": 19551,
+    "production_target_loc": 10000000,
+    "loc_remaining": 9980449,
+    "percent_complete": 0.196,
+    "bugs_found_original": 33,
+    "bugs_fixed_all_sessions": 51,
+    "critical_bugs_remaining": 0,
+    "high_severity_bugs_remaining": 0,
+    "medium_severity_bugs_remaining": 0,
+    "low_severity_bugs_remaining": 0,
+    "stubs_remaining": 0,
+    "tests_passing": "126/126",
+    "executables_built": 19,
+    "cuda_kernels": 22
+  },
+  "section_2_file_audit": {
+    "src_files": 36,
+    "src_loc": 14600,
+    "engines_files": 27,
+    "engines_loc": 2320,
+    "include_files": 33,
+    "include_loc": 3129,
+    "tests_files": 18,
+    "tests_loc": 3400,
+    "bench_files": 4,
+    "bench_loc": 556,
+    "tools_files": 6,
+    "tools_loc": 964
+  },
+  "section_3_bugs": {
+    "total_bugs": 53,
+    "all_fixed": true,
+    "fix_date": "2026-07-13",
+    "critical_bugs": ["BUG1", "BUG2", "BUG3", "BUG4", "BUG5", "BUG6", "BUG29", "BUG50", "BUG51"],
+    "high_bugs": ["BUG7", "BUG8", "BUG9", "BUG10", "BUG11", "BUG12", "BUG13", "BUG14", "BUG30", "BUG52"],
+    "medium_bugs": ["BUG15", "BUG16", "BUG17", "BUG18", "BUG19", "BUG20", "BUG21", "BUG22", "BUG32", "BUG33"],
+    "low_bugs": ["BUG23", "BUG24", "BUG25", "BUG26", "BUG27", "BUG28"]
+  },
+  "section_5_stubs": {
+    "category_a_critical": 7,
+    "category_b_important": 8,
+    "category_c_feature": 5,
+    "category_d_build": 3,
+    "all_fixed": true
+  },
+  "section_6_new_features": {
+    "flashattention_gpu": "PENDING - ~300 LOC CUDA kernel not implemented",
+    "speculative_decoding": "PENDING - enhancement needed",
+    "paged_kv_cache": "PENDING - improvements needed",
+    "batch_inference": "PENDING - padding/masking needed",
+    "training_test": "PENDING - loss decrease verification needed",
+    "rope_cuda": "PENDING - correctness test needed",
+    "wsl_linux_build": "PENDING - build not verified"
+  },
+  "section_7_effort": {
+    "loc_done": 18788,
+    "loc_remaining": 216000,
+    "current_total_loc_measured": 25049,
+    "target_loc": 200000
+  }
+}

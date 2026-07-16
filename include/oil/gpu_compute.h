@@ -115,6 +115,9 @@ public:
     void moe_scatter_add(void* out, const int64_t* indices, const float* weights,
                          const void* expert_out, int64_t T, int64_t K, int64_t D);
 
+    void flash_attention(void* out, const void* Q, const void* K, const void* V,
+                        int64_t B, int64_t H, int64_t N, int64_t D, bool causal);
+
     void synchronize();
     int64_t memory_free() const;
     int64_t memory_total() const;

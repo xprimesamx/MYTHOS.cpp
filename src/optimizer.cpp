@@ -1,123 +1,420 @@
 #include "oil/optimizer.h"
 #include <cmath>
 #include <algorithm>
+#include <numeric>
 
 namespace oil {
 
-void Optimizer::add_param(Tensor* param) {
-    parameters_.push_back(param);
-}
-
+// ============================================================
+// Optimizer base
+// ============================================================
+void Optimizer::add_param(Tensor* param) { parameters_.push_back(param); }
 void Optimizer::add_param_group(std::vector<Tensor*> params) {
     for (auto* p : params) add_param(p);
 }
-
 void Optimizer::zero_grad() {
     for (auto* p : parameters_) {
-        if (p->requires_grad()) {
-            if (p->has_grad()) {
-                p->grad().zero_();
-            }
-        }
+        if (p->requires_grad() && p->has_grad()) p->grad().zero_();
     }
 }
-
-AdamW::AdamW(float lr, float beta1, float beta2, float eps, float weight_decay)
-    : lr_(lr), current_lr_(lr), beta1_(beta1), beta2_(beta2), eps_(eps), weight_decay_(weight_decay), t_(0) {}
-
-void AdamW::set_lr(float lr) { lr_ = lr; }
-float AdamW::get_lr() const { return current_lr_ > 0 ? current_lr_ : lr_; }
-void AdamW::set_weight_decay(float wd) { weight_decay_ = wd; }
-void AdamW::set_schedule(Schedule s, int warmup_steps, int total_steps) {
-    schedule_ = s;
-    warmup_steps_ = warmup_steps;
-    total_steps_ = total_steps;
+float Optimizer::clip_grad_norm() {
+    if (grad_clip_norm_ <= 0.0f || parameters_.empty()) return 0.0f;
+    double total_norm = 0.0;
+    for (auto* p : parameters_) {
+        if (!p->has_grad()) continue;
+        const float* g = p->grad().data<float>();
+        int64_t n = p->numel();
+        double p_norm = 0.0;
+        for (int64_t i = 0; i < n; i++) p_norm += (double)g[i] * g[i];
+        total_norm += p_norm;
+    }
+    total_norm = std::sqrt(total_norm);
+    if (total_norm == 0.0) return 0.0f;
+    float scale = (float)(grad_clip_norm_ / total_norm);
+    if (scale >= 1.0f) return (float)total_norm;
+    for (auto* p : parameters_) {
+        if (!p->has_grad()) continue;
+        float* g = p->grad().data<float>();
+        int64_t n = p->numel();
+        for (int64_t i = 0; i < n; i++) g[i] *= scale;
+    }
+    return (float)total_norm;
 }
 
+// ============================================================
+// AdamW
+// ============================================================
+AdamW::AdamW(float lr, float beta1, float beta2, float eps, float weight_decay)
+    : Optimizer(lr, weight_decay), beta1_(beta1), beta2_(beta2), eps_(eps), current_lr_(lr) {}
+void AdamW::zero_grad() { Optimizer::zero_grad(); }
+void AdamW::set_schedule(Schedule s, int warmup_steps, int total_steps, int restart_period) {
+    schedule_ = s; warmup_steps_ = warmup_steps;
+    total_steps_ = total_steps; restart_period_ = restart_period;
+}
 void AdamW::scheduler_step(int step) {
-    float ratio = total_steps_ > 0 ? (float)step / total_steps_ : 1.0f;
+    current_lr_ = adjusted_lr(step);
+}
+float AdamW::adjusted_lr(int step) {
+    if (total_steps_ <= 0) return lr_;
+    float ratio = (float)step / total_steps_;
+    float lr = lr_;
     switch (schedule_) {
-        case Schedule::CONSTANT:
-            current_lr_ = lr_;
-            break;
+        case Schedule::CONSTANT: lr = lr_; break;
         case Schedule::COSINE:
-            current_lr_ = lr_ * 0.5f * (1.0f + std::cos(3.14159265f * ratio));
+            lr = lr_ * 0.5f * (1.0f + std::cos(3.14159265f * ratio));
             break;
         case Schedule::LINEAR:
-            current_lr_ = lr_ * (1.0f - ratio);
+            lr = lr_ * (1.0f - ratio);
             break;
         case Schedule::WARMUP_COSINE:
-            if (step < warmup_steps_) {
-                current_lr_ = lr_ * (float)step / warmup_steps_;
-            } else {
-                float cos_ratio = (float)(step - warmup_steps_) / (total_steps_ - warmup_steps_);
-                current_lr_ = lr_ * 0.5f * (1.0f + std::cos(3.14159265f * cos_ratio));
+            if (step < warmup_steps_)
+                lr = lr_ * (float)step / warmup_steps_;
+            else {
+                float cos_ratio = (float)(step - warmup_steps_) /
+                                  std::max(1, total_steps_ - warmup_steps_);
+                lr = lr_ * 0.5f * (1.0f + std::cos(3.14159265f * cos_ratio));
             }
             break;
+        case Schedule::COSINE_RESTART: {
+            int p = restart_period_ > 0 ? restart_period_ : total_steps_ / 4;
+            int cycles = step / p;
+            int step_in_cycle = step % p;
+            float cycle_ratio = (float)step_in_cycle / p;
+            float decay = std::pow(0.5f, (float)cycles);
+            lr = lr_ * decay * 0.5f * (1.0f + std::cos(3.14159265f * cycle_ratio));
+            break;
+        }
     }
-    if (current_lr_ < 1e-8f) current_lr_ = 1e-8f;
+    if (lr < 1e-8f) lr = 1e-8f;
+    return lr;
 }
-
-void AdamW::zero_grad() { Optimizer::zero_grad(); }
-
 void AdamW::step() {
     if (parameters_.empty()) return;
     t_++;
-    scheduler_step(t_);
-    float lr = current_lr_ > 0 ? current_lr_ : lr_;
+    clip_grad_norm();
+    float lr = adjusted_lr(t_);
+    if (lr <= 0) lr = lr_;
     float bias_corr1 = 1.0f - std::pow(beta1_, t_);
     float bias_corr2 = 1.0f - std::pow(beta2_, t_);
     float lr_adj = lr * std::sqrt(bias_corr2) / bias_corr1;
-    
     for (auto* param : parameters_) {
         if (!param->requires_grad() || !param->has_grad() || param->grad().numel() == 0) continue;
-        
         auto& state = state_[param];
         if (!state.m.buffer()) {
             state.m = Tensor::zeros(param->shape());
             state.v = Tensor::zeros(param->shape());
         }
-        
-        float* m = (float*)state.m.data();
-        float* v = (float*)state.v.data();
-        const float* g = (const float*)param->grad().data();
-        float* p = (float*)param->data();
+        float* m = state.m.data<float>();
+        float* v = state.v.data<float>();
+        const float* g = param->grad().data<float>();
+        float* p = param->data<float>();
         int64_t n = param->numel();
-        
         for (int64_t i = 0; i < n; i++) {
             p[i] -= lr * weight_decay_ * p[i];
             m[i] = beta1_ * m[i] + (1.0f - beta1_) * g[i];
             v[i] = beta2_ * v[i] + (1.0f - beta2_) * g[i] * g[i];
-            float m_hat = m[i] / bias_corr1;
-            float v_hat = v[i] / bias_corr2;
-            p[i] -= lr_adj * m_hat / (std::sqrt(v_hat) + eps_);
+            p[i] -= lr_adj * m[i] / (std::sqrt(v[i] / bias_corr2) + eps_);
         }
     }
 }
 
+// ============================================================
+// SGD
+// ============================================================
+SGD::SGD(float lr, float momentum, float weight_decay, bool nesterov)
+    : Optimizer(lr, weight_decay), momentum_(momentum), nesterov_(nesterov) {}
 void SGD::zero_grad() { Optimizer::zero_grad(); }
-
-SGD::SGD(float lr, float momentum, float weight_decay)
-    : lr_(lr), momentum_(momentum), weight_decay_(weight_decay) {}
-
 void SGD::step() {
+    if (parameters_.empty()) return;
+    t_++;
+    clip_grad_norm();
     for (auto* param : parameters_) {
         if (!param->requires_grad() || !param->has_grad() || param->grad().numel() == 0) continue;
-        
+        auto& state = state_[param];
+        if (!state.m.buffer())
+            state.m = Tensor::zeros(param->shape());
+        float* m = state.m.data<float>();
+        const float* g = param->grad().data<float>();
+        float* p = param->data<float>();
+        int64_t n = param->numel();
+        if (momentum_ > 0.0f) {
+            for (int64_t i = 0; i < n; i++) {
+                float g_reg = g[i] + weight_decay_ * p[i];
+                float prev_m = m[i];
+                m[i] = momentum_ * m[i] + lr_ * g_reg;
+                if (nesterov_)
+                    p[i] -= momentum_ * m[i] + (1.0f + momentum_) * lr_ * g_reg - momentum_ * prev_m;
+                else
+                    p[i] -= m[i];
+            }
+        } else {
+            for (int64_t i = 0; i < n; i++)
+                p[i] -= lr_ * (g[i] + weight_decay_ * p[i]);
+        }
+    }
+}
+
+// ============================================================
+// Adam
+// ============================================================
+Adam::Adam(float lr, float beta1, float beta2, float eps, float weight_decay)
+    : Optimizer(lr, weight_decay), beta1_(beta1), beta2_(beta2), eps_(eps) {}
+void Adam::zero_grad() { Optimizer::zero_grad(); }
+void Adam::step() {
+    if (parameters_.empty()) return;
+    t_++; clip_grad_norm();
+    float bias_corr1 = 1.0f - std::pow(beta1_, t_);
+    float bias_corr2 = 1.0f - std::pow(beta2_, t_);
+    for (auto* param : parameters_) {
+        if (!param->requires_grad() || !param->has_grad() || param->grad().numel() == 0) continue;
         auto& state = state_[param];
         if (!state.m.buffer()) {
             state.m = Tensor::zeros(param->shape());
+            state.v = Tensor::zeros(param->shape());
         }
-        
-        float* m = (float*)state.m.data();
-        const float* g = (const float*)param->grad().data();
-        float* p = (float*)param->data();
+        float* m = state.m.data<float>();
+        float* v = state.v.data<float>();
+        const float* g = param->grad().data<float>();
+        float* p = param->data<float>();
         int64_t n = param->numel();
-        
         for (int64_t i = 0; i < n; i++) {
-            float g_reg = g[i] + weight_decay_ * p[i];
-            m[i] = momentum_ * m[i] + lr_ * g_reg;
-            p[i] -= m[i];
+            m[i] = beta1_ * m[i] + (1.0f - beta1_) * g[i];
+            v[i] = beta2_ * v[i] + (1.0f - beta2_) * g[i] * g[i];
+            float m_hat = m[i] / bias_corr1;
+            float v_hat = v[i] / bias_corr2;
+            p[i] -= lr_ * m_hat / (std::sqrt(v_hat) + eps_);
+            p[i] -= lr_ * weight_decay_ * p[i];
+        }
+    }
+}
+
+// ============================================================
+// Adamax
+// ============================================================
+Adamax::Adamax(float lr, float beta1, float beta2, float eps, float weight_decay)
+    : Optimizer(lr, weight_decay), beta1_(beta1), beta2_(beta2), eps_(eps) {}
+void Adamax::zero_grad() { Optimizer::zero_grad(); }
+void Adamax::step() {
+    if (parameters_.empty()) return;
+    t_++; clip_grad_norm();
+    float bias_corr1 = 1.0f - std::pow(beta1_, t_);
+    for (auto* param : parameters_) {
+        if (!param->requires_grad() || !param->has_grad() || param->grad().numel() == 0) continue;
+        auto& state = state_[param];
+        if (!state.m.buffer()) {
+            state.m = Tensor::zeros(param->shape());
+            state.v = Tensor::zeros(param->shape());
+        }
+        float* m = state.m.data<float>();
+        float* u = state.v.data<float>();
+        const float* g = param->grad().data<float>();
+        float* p = param->data<float>();
+        int64_t n = param->numel();
+        for (int64_t i = 0; i < n; i++) {
+            m[i] = beta1_ * m[i] + (1.0f - beta1_) * g[i];
+            u[i] = std::max(beta2_ * u[i], std::abs(g[i]) + eps_);
+            float m_hat = m[i] / bias_corr1;
+            p[i] -= (lr_ / (1.0f - bias_corr1)) * m_hat / u[i];
+            p[i] -= lr_ * weight_decay_ * p[i];
+        }
+    }
+}
+
+// ============================================================
+// NAdam
+// ============================================================
+NAdam::NAdam(float lr, float beta1, float beta2, float eps, float weight_decay,
+             float momentum_decay)
+    : Optimizer(lr, weight_decay), beta1_(beta1), beta2_(beta2), eps_(eps),
+      momentum_decay_(momentum_decay) {}
+void NAdam::zero_grad() { Optimizer::zero_grad(); }
+void NAdam::step() {
+    if (parameters_.empty()) return;
+    t_++; clip_grad_norm();
+    float bias_corr2 = 1.0f - std::pow(beta2_, t_);
+    float beta1_t = beta1_ * (1.0f - 0.5f * std::pow(0.96f, (float)t_ * momentum_decay_));
+    for (auto* param : parameters_) {
+        if (!param->requires_grad() || !param->has_grad() || param->grad().numel() == 0) continue;
+        auto& state = state_[param];
+        if (!state.m.buffer()) {
+            state.m = Tensor::zeros(param->shape());
+            state.v = Tensor::zeros(param->shape());
+        }
+        float* m = state.m.data<float>();
+        float* v = state.v.data<float>();
+        const float* g = param->grad().data<float>();
+        float* p = param->data<float>();
+        int64_t n = param->numel();
+        for (int64_t i = 0; i < n; i++) {
+            m[i] = beta1_ * m[i] + (1.0f - beta1_) * g[i];
+            v[i] = beta2_ * v[i] + (1.0f - beta2_) * g[i] * g[i];
+            float m_hat = m[i] / (1.0f - std::pow(beta1_, t_));
+            float m_nesterov = beta1_t * m_hat + (1.0f - beta1_t) * g[i] / (1.0f - std::pow(beta1_, t_));
+            float v_hat = v[i] / bias_corr2;
+            p[i] -= lr_ * m_nesterov / (std::sqrt(v_hat) + eps_);
+            p[i] -= lr_ * weight_decay_ * p[i];
+        }
+    }
+}
+
+// ============================================================
+// RAdam
+// ============================================================
+RAdam::RAdam(float lr, float beta1, float beta2, float eps, float weight_decay)
+    : Optimizer(lr, weight_decay), beta1_(beta1), beta2_(beta2), eps_(eps) {}
+void RAdam::zero_grad() { Optimizer::zero_grad(); }
+void RAdam::step() {
+    if (parameters_.empty()) return;
+    t_++; clip_grad_norm();
+    float rho_inf = 2.0f / (1.0f - beta2_) - 1.0f;
+    float bias_corr1 = 1.0f - std::pow(beta1_, t_);
+    float bias_corr2 = 1.0f - std::pow(beta2_, t_);
+    float rho = rho_inf - 2.0f * (float)t_ * beta2_ / (1.0f - beta2_);
+    for (auto* param : parameters_) {
+        if (!param->requires_grad() || !param->has_grad() || param->grad().numel() == 0) continue;
+        auto& state = state_[param];
+        if (!state.m.buffer()) {
+            state.m = Tensor::zeros(param->shape());
+            state.v = Tensor::zeros(param->shape());
+        }
+        float* m = state.m.data<float>();
+        float* v = state.v.data<float>();
+        const float* g = param->grad().data<float>();
+        float* p = param->data<float>();
+        int64_t n = param->numel();
+        for (int64_t i = 0; i < n; i++) {
+            m[i] = beta1_ * m[i] + (1.0f - beta1_) * g[i];
+            v[i] = beta2_ * v[i] + (1.0f - beta2_) * g[i] * g[i];
+            float m_hat = m[i] / bias_corr1;
+            float v_hat = v[i] / bias_corr2;
+            if (rho > 4.0f) {
+                float r_approx = (rho - 4.0f) * (rho - 2.0f) * rho_inf /
+                                 (rho_inf - 4.0f) / (rho_inf - 2.0f) / rho;
+                p[i] -= lr_ * m_hat * r_approx / (std::sqrt(v_hat) + eps_);
+            } else {
+                p[i] -= lr_ * m_hat;
+            }
+            p[i] -= lr_ * weight_decay_ * p[i];
+        }
+    }
+}
+
+// ============================================================
+// Lion
+// ============================================================
+Lion::Lion(float lr, float beta1, float beta2, float weight_decay)
+    : Optimizer(lr, weight_decay), beta1_(beta1), beta2_(beta2) {}
+void Lion::zero_grad() { Optimizer::zero_grad(); }
+void Lion::step() {
+    if (parameters_.empty()) return;
+    t_++; clip_grad_norm();
+    for (auto* param : parameters_) {
+        if (!param->requires_grad() || !param->has_grad() || param->grad().numel() == 0) continue;
+        auto& state = state_[param];
+        if (!state.m.buffer())
+            state.m = Tensor::zeros(param->shape());
+        float* m = state.m.data<float>();
+        const float* g = param->grad().data<float>();
+        float* p = param->data<float>();
+        int64_t n = param->numel();
+        for (int64_t i = 0; i < n; i++) {
+            float update = m[i] * beta1_ + g[i] * (1.0f - beta1_);
+            float sign = (update > 0.0f) ? 1.0f : ((update < 0.0f) ? -1.0f : 0.0f);
+            p[i] -= lr_ * sign;
+            p[i] -= lr_ * weight_decay_ * p[i];
+            m[i] = m[i] * beta2_ + g[i] * (1.0f - beta2_);
+        }
+    }
+}
+
+// ============================================================
+// Adafactor
+// ============================================================
+Adafactor::Adafactor(float lr, float beta2, float eps, float weight_decay,
+                     float clip_threshold, float decay_rate)
+    : Optimizer(lr, weight_decay), beta2_(beta2), eps_(eps),
+      clip_threshold_(clip_threshold), decay_rate_(decay_rate) {}
+void Adafactor::zero_grad() { Optimizer::zero_grad(); }
+void Adafactor::step() {
+    if (parameters_.empty()) return;
+    t_++; clip_grad_norm();
+    for (auto* param : parameters_) {
+        if (!param->requires_grad() || !param->has_grad() || param->grad().numel() == 0) continue;
+        auto& fs = factor_state_[param];
+        if (!fs.m.buffer()) {
+            fs.m = Tensor::zeros(param->shape());
+            fs.r = Tensor::zeros({param->dim(0), 1});
+            fs.c = Tensor::zeros({1, param->dim(1)});
+        }
+        const float* g = param->grad().data<float>();
+        float* p = param->data<float>();
+        int64_t d0 = param->dim(0), d1 = param->dim(1);
+        float* r = fs.r.data<float>();
+        float* c = fs.c.data<float>();
+        float* m = fs.m.data<float>();
+        float g_mean = 0.0f;
+        int64_t n = param->numel();
+        for (int64_t i = 0; i < n; i++) g_mean += g[i] * g[i];
+        g_mean = std::sqrt(g_mean / (float)n) + eps_;
+        for (int64_t i = 0; i < d0; i++) {
+            float row_sum = 0;
+            for (int64_t j = 0; j < d1; j++)
+                row_sum += g[i * d1 + j] * g[i * d1 + j];
+            r[i] = decay_rate_ * r[i] + (1.0f - decay_rate_) * row_sum / (float)d1;
+        }
+        for (int64_t j = 0; j < d1; j++) {
+            float col_sum = 0;
+            for (int64_t i = 0; i < d0; i++)
+                col_sum += g[i * d1 + j] * g[i * d1 + j];
+            c[j] = decay_rate_ * c[j] + (1.0f - decay_rate_) * col_sum / (float)d0;
+        }
+        float r_mean = 0;
+        for (int64_t i = 0; i < d0; i++) r_mean += r[i];
+        r_mean /= (float)d0;
+        float step = lr_ / (std::sqrt(r_mean) + eps_);
+        float p_factor = 1.0f - weight_decay_ * lr_;
+        for (int64_t i = 0; i < n; i++) {
+            float v_hat = r[i / d1] * c[i % d1] / r_mean;
+            float update = g[i] / (std::sqrt(v_hat) + eps_);
+            update = update * clip_threshold_ / std::max(1.0f, std::abs(update) / g_mean);
+            m[i] = beta2_ * m[i] + (1.0f - beta2_) * update;
+            p[i] *= p_factor;
+            p[i] -= step * m[i];
+        }
+    }
+}
+
+// ============================================================
+// RMSProp
+// ============================================================
+RMSProp::RMSProp(float lr, float rho, float eps, float weight_decay, float momentum)
+    : Optimizer(lr, weight_decay), rho_(rho), eps_(eps), momentum_(momentum) {}
+void RMSProp::zero_grad() { Optimizer::zero_grad(); }
+void RMSProp::step() {
+    if (parameters_.empty()) return;
+    t_++; clip_grad_norm();
+    for (auto* param : parameters_) {
+        if (!param->requires_grad() || !param->has_grad() || param->grad().numel() == 0) continue;
+        auto& state = state_[param];
+        if (!state.v.buffer()) {
+            state.v = Tensor::zeros(param->shape());
+            if (momentum_ > 0) state.m = Tensor::zeros(param->shape());
+        }
+        float* v = state.v.data<float>();
+        float* buf = momentum_ > 0 ? state.m.data<float>() : nullptr;
+        const float* g = param->grad().data<float>();
+        float* p = param->data<float>();
+        int64_t n = param->numel();
+        for (int64_t i = 0; i < n; i++) {
+            v[i] = rho_ * v[i] + (1.0f - rho_) * g[i] * g[i];
+            float update = lr_ * g[i] / (std::sqrt(v[i]) + eps_);
+            if (momentum_ > 0.0f) {
+                buf[i] = momentum_ * buf[i] + update;
+                p[i] -= buf[i];
+            } else {
+                p[i] -= update;
+            }
+            p[i] -= lr_ * weight_decay_ * p[i];
         }
     }
 }

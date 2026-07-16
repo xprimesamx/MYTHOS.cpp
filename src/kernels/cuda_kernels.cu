@@ -590,6 +590,128 @@ void launch_cuda_gemm(float alpha, const float* A, const float* B,
     }
 }
 
+// ========================================================================
+// FlashAttention-2 GPU kernel — tiled shared memory online softmax causal
+// One thread per query row. K/V tiles in shared memory (collaborative load).
+// Per-thread state (qi, o_acc, row_max, row_sum) in registers/local mem.
+// Online softmax: rescale o_acc ONCE per block, accumulate within j-loop.
+// ========================================================================
+
+#define FA_MAX_D 128
+
+__global__ void cuda_flash_attention_kernel(
+    float* out,
+    const float* Q, const float* K, const float* V,
+    int B, int H, int N, int D,
+    int block_size, bool causal) {
+
+    int batch = blockIdx.x;
+    int head = blockIdx.y;
+    int q_idx = blockIdx.z * blockDim.x + threadIdx.x;
+
+    if (batch >= B || head >= H || q_idx >= N) return;
+    if (D > FA_MAX_D) return;
+
+    float scale = 1.0f / sqrtf((float)D);
+
+    extern __shared__ float smem[];
+    float* k_tile = smem;
+    float* v_tile = smem + block_size * FA_MAX_D;
+
+    const float* q_row = Q + ((batch * H + head) * N + q_idx) * D;
+    float* o_row = out + ((batch * H + head) * N + q_idx) * D;
+
+    float o_acc[FA_MAX_D];
+    float qi[FA_MAX_D];
+    float row_max_val = -INFINITY;
+    float row_sum_val = 0.0f;
+
+    for (int d = 0; d < D; d++) {
+        qi[d] = q_row[d];
+        o_acc[d] = 0.0f;
+    }
+
+    for (int kv_start = 0; kv_start < N; kv_start += block_size) {
+        int kv_end = min(kv_start + block_size, N);
+        int kv_len = kv_end - kv_start;
+
+        if (causal && kv_start > q_idx) break;
+
+        int total_load = kv_len * D;
+        for (int j = threadIdx.x; j < total_load; j += blockDim.x) {
+            int local_j = j / D;
+            int local_d = j % D;
+            int global_j = kv_start + local_j;
+            k_tile[local_j * FA_MAX_D + local_d] = K[((batch * H + head) * N + global_j) * D + local_d];
+            v_tile[local_j * FA_MAX_D + local_d] = V[((batch * H + head) * N + global_j) * D + local_d];
+        }
+        __syncthreads();
+
+        float block_max = -INFINITY;
+        for (int j = 0; j < kv_len; j++) {
+            int global_j = kv_start + j;
+            if (causal && global_j > q_idx) break;
+
+            float score = 0.0f;
+            for (int d = 0; d < D; d++)
+                score += qi[d] * k_tile[j * FA_MAX_D + d];
+            score *= scale;
+            if (score > block_max) block_max = score;
+        }
+
+        float new_max = fmaxf(row_max_val, block_max);
+        float exp_diff = (row_max_val > -INFINITY) ? expf(row_max_val - new_max) : 0.0f;
+
+        for (int d = 0; d < D; d++)
+            o_acc[d] *= exp_diff;
+        row_sum_val *= exp_diff;
+
+        for (int j = 0; j < kv_len; j++) {
+            int global_j = kv_start + j;
+            if (causal && global_j > q_idx) break;
+
+            float score = 0.0f;
+            for (int d = 0; d < D; d++)
+                score += qi[d] * k_tile[j * FA_MAX_D + d];
+            score *= scale;
+
+            float e = expf(score - new_max);
+            for (int d = 0; d < D; d++)
+                o_acc[d] += e * v_tile[j * FA_MAX_D + d];
+            row_sum_val += e;
+        }
+
+        row_max_val = new_max;
+        __syncthreads();
+    }
+
+    float inv_sum = 1.0f / (row_sum_val + 1e-10f);
+    for (int d = 0; d < D; d++)
+        o_row[d] = o_acc[d] * inv_sum;
+}
+
+void launch_cuda_flash_attention(
+    float* out, const float* Q, const float* K, const float* V,
+    int B, int H, int N, int D, int block_size, bool causal) {
+
+    int threads = 32;
+    int q_blocks = (N + threads - 1) / threads;
+
+    dim3 grid(B, H, q_blocks);
+    dim3 block_dim(threads);
+
+    int smem_size = 2 * block_size * FA_MAX_D * (int)sizeof(float);
+
+    cuda_flash_attention_kernel<<<grid, block_dim, smem_size>>>(
+        out, Q, K, V, B, H, N, D, block_size, causal);
+}
+
+void launch_cuda_flash_attention_causal(
+    float* out, const float* Q, const float* K, const float* V,
+    int B, int H, int N, int D) {
+    launch_cuda_flash_attention(out, Q, K, V, B, H, N, D, 64, true);
+}
+
 } // extern "C"
 
 #endif // __CUDACC__

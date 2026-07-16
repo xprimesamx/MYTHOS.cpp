@@ -759,4 +759,286 @@ Tensor CrossModalAlignment::align(const Tensor& image_emb, const Tensor& text_em
     return aligned;
 }
 
+// ============================================================================
+// H16: Perceiver — learned query-based cross-attention
+// ============================================================================
+Perceiver::Perceiver(int64_t hidden, int64_t num_queries, int64_t num_heads)
+    : hidden_(hidden), num_queries_(num_queries),
+      q_proj(hidden, hidden), k_proj(hidden, hidden),
+      v_proj(hidden, hidden), out_proj(hidden, hidden) {}
+
+Tensor Perceiver::forward(const Tensor& input, const Tensor& queries) {
+    int64_t T = input.dim(0);
+    int64_t D = hidden_;
+    int64_t Q = queries.dim(0);
+
+    Tensor Q_out = q_proj.forward(queries);
+    Tensor K_out = k_proj.forward(input);
+    Tensor V_out = v_proj.forward(input);
+
+    float scale = 1.0f / std::sqrt((float)D);
+    Tensor output({Q, D});
+    output.zero_();
+    float* od = output.data<float>();
+    const float* qd = Q_out.data<float>();
+    const float* kd = K_out.data<float>();
+    const float* vd = V_out.data<float>();
+
+    for (int64_t q = 0; q < Q; ++q) {
+        float row_max = -INFINITY;
+        std::vector<float> scores((size_t)T);
+        for (int64_t t = 0; t < T; ++t) {
+            float dot = 0;
+            for (int64_t d = 0; d < D; ++d)
+                dot += qd[q * D + d] * kd[t * D + d];
+            scores[(size_t)t] = dot * scale;
+            if (scores[(size_t)t] > row_max) row_max = scores[(size_t)t];
+        }
+        float sum = 0;
+        for (int64_t t = 0; t < T; ++t) {
+            scores[(size_t)t] = std::exp(scores[(size_t)t] - row_max);
+            sum += scores[(size_t)t];
+        }
+        for (int64_t t = 0; t < T; ++t) {
+            float w = scores[(size_t)t] / (sum + 1e-10f);
+            for (int64_t d = 0; d < D; ++d)
+                od[q * D + d] += w * vd[t * D + d];
+        }
+    }
+    return out_proj.forward(output);
+}
+
+// ============================================================================
+// H17: Vision MoE — modality-specific expert routing for vision
+// ============================================================================
+VisionMoE::VisionMoE(int64_t hidden, int64_t num_experts)
+    : hidden_(hidden), router(hidden, num_experts) {
+    for (int64_t i = 0; i < num_experts; ++i)
+        experts.emplace_back(hidden, hidden * 4);
+}
+
+Tensor VisionMoE::forward(const Tensor& image_features) {
+    int64_t T = image_features.dim(0);
+    int64_t D = hidden_;
+    int64_t E = (int64_t)experts.size();
+    Tensor logits = router.forward(image_features);
+    Tensor probs({T, E});
+    math::softmax(logits, probs, 1);
+    const float* pd = probs.data<float>();
+    const float* xd = image_features.data<float>();
+    Tensor output({T, D});
+    output.zero_();
+    float* od = output.data<float>();
+    for (int64_t e = 0; e < E; ++e) {
+        Tensor expert_out = experts[(size_t)e].forward(image_features);
+        const float* eo = expert_out.data<float>();
+        for (int64_t t = 0; t < T; ++t) {
+            float w = pd[t * E + e];
+            for (int64_t d = 0; d < D; ++d)
+                od[t * D + d] += w * eo[t * D + d];
+        }
+    }
+    return output;
+}
+
+// ============================================================================
+// H18: Audio MoE — modality-specific expert routing for audio
+// ============================================================================
+AudioMoE::AudioMoE(int64_t hidden, int64_t num_experts)
+    : hidden_(hidden), router(hidden, num_experts) {
+    for (int64_t i = 0; i < num_experts; ++i)
+        experts.emplace_back(hidden, hidden * 4);
+}
+
+Tensor AudioMoE::forward(const Tensor& audio_features) {
+    int64_t T = audio_features.dim(0);
+    int64_t D = hidden_;
+    int64_t E = (int64_t)experts.size();
+    Tensor logits = router.forward(audio_features);
+    Tensor probs({T, E});
+    math::softmax(logits, probs, 1);
+    const float* pd = probs.data<float>();
+    const float* xd = audio_features.data<float>();
+    Tensor output({T, D});
+    output.zero_();
+    float* od = output.data<float>();
+    for (int64_t e = 0; e < E; ++e) {
+        Tensor expert_out = experts[(size_t)e].forward(audio_features);
+        const float* eo = expert_out.data<float>();
+        for (int64_t t = 0; t < T; ++t) {
+            float w = pd[t * E + e];
+            for (int64_t d = 0; d < D; ++d)
+                od[t * D + d] += w * eo[t * D + d];
+        }
+    }
+    return output;
+}
+
+// ============================================================================
+// H19: Vision+Text MoE — cross-modal routing
+// ============================================================================
+VisionTextMoE::VisionTextMoE(int64_t hidden, int64_t num_experts)
+    : hidden_(hidden), router(hidden, num_experts),
+      modality_bias(hidden, 2) {
+    for (int64_t i = 0; i < num_experts; ++i)
+        experts.emplace_back(hidden, hidden * 4);
+}
+
+Tensor VisionTextMoE::forward(const Tensor& vision_tokens, const Tensor& text_tokens) {
+    int64_t V = vision_tokens.dim(0);
+    int64_t T = text_tokens.dim(0);
+    int64_t D = hidden_;
+    int64_t total = V + T;
+    int64_t E = (int64_t)experts.size();
+
+    Tensor combined({total, D});
+    float* cd = combined.data<float>();
+    std::memcpy(cd, vision_tokens.data<float>(), (size_t)(V * D) * sizeof(float));
+    std::memcpy(cd + V * D, text_tokens.data<float>(), (size_t)(T * D) * sizeof(float));
+
+    Tensor logits = router.forward(combined);
+    float* ld = logits.data<float>();
+
+    Tensor mod_bias = modality_bias.forward(combined);
+    const float* md = mod_bias.data<float>();
+    for (int64_t t = 0; t < total; ++t) {
+        int64_t mod = (t < V) ? 0 : 1;
+        for (int64_t e = 0; e < E; ++e) {
+            ld[t * E + e] += 5.0f * md[t * 2 + mod];
+        }
+    }
+
+    Tensor probs({total, E});
+    math::softmax(logits, probs, 1);
+    const float* pd = probs.data<float>();
+
+    Tensor output({total, D});
+    output.zero_();
+    float* od = output.data<float>();
+    for (int64_t e = 0; e < E; ++e) {
+        Tensor expert_out = experts[(size_t)e].forward(combined);
+        const float* eo = expert_out.data<float>();
+        for (int64_t t = 0; t < total; ++t) {
+            float w = pd[t * E + e];
+            for (int64_t d = 0; d < D; ++d)
+                od[t * D + d] += w * eo[t * D + d];
+        }
+    }
+    return output;
+}
+
+// ============================================================================
+// H20: Audio+Text MoE — cross-modal routing
+// ============================================================================
+AudioTextMoE::AudioTextMoE(int64_t hidden, int64_t num_experts)
+    : hidden_(hidden), router(hidden, num_experts),
+      modality_bias(hidden, 2) {
+    for (int64_t i = 0; i < num_experts; ++i)
+        experts.emplace_back(hidden, hidden * 4);
+}
+
+Tensor AudioTextMoE::forward(const Tensor& audio_tokens, const Tensor& text_tokens) {
+    int64_t A = audio_tokens.dim(0);
+    int64_t T = text_tokens.dim(0);
+    int64_t D = hidden_;
+    int64_t total = A + T;
+    int64_t E = (int64_t)experts.size();
+
+    Tensor combined({total, D});
+    float* cd = combined.data<float>();
+    std::memcpy(cd, audio_tokens.data<float>(), (size_t)(A * D) * sizeof(float));
+    std::memcpy(cd + A * D, text_tokens.data<float>(), (size_t)(T * D) * sizeof(float));
+
+    Tensor logits = router.forward(combined);
+    float* ld = logits.data<float>();
+    Tensor mod_bias = modality_bias.forward(combined);
+    const float* md = mod_bias.data<float>();
+    for (int64_t t = 0; t < total; ++t) {
+        int64_t mod = (t < A) ? 0 : 1;
+        for (int64_t e = 0; e < E; ++e)
+            ld[t * E + e] += 5.0f * md[t * 2 + mod];
+    }
+
+    Tensor probs({total, E});
+    math::softmax(logits, probs, 1);
+    const float* pd = probs.data<float>();
+
+    Tensor output({total, D});
+    output.zero_();
+    float* od = output.data<float>();
+    for (int64_t e = 0; e < E; ++e) {
+        Tensor expert_out = experts[(size_t)e].forward(combined);
+        const float* eo = expert_out.data<float>();
+        for (int64_t t = 0; t < total; ++t) {
+            float w = pd[t * E + e];
+            for (int64_t d = 0; d < D; ++d)
+                od[t * D + d] += w * eo[t * D + d];
+        }
+    }
+    return output;
+}
+
+// ============================================================================
+// H21: All Modality MoE — routes across all modalities
+// ============================================================================
+AllModalityMoE::AllModalityMoE(int64_t hidden, int64_t num_experts)
+    : hidden_(hidden), router(hidden, num_experts),
+      modality_classifier(hidden, 6) {
+    for (int64_t i = 0; i < num_experts; ++i)
+        experts.emplace_back(hidden, hidden * 4);
+}
+
+Tensor AllModalityMoE::forward(const std::vector<Tensor>& modality_tokens) {
+    if (modality_tokens.empty())
+        return Tensor({hidden_});
+    int64_t D = hidden_;
+    int64_t E = (int64_t)experts.size();
+
+    int64_t total = 0;
+    for (auto& m : modality_tokens)
+        total += m.dim(0);
+
+    Tensor combined({total, D});
+    float* cd = combined.data<float>();
+    int64_t offset = 0;
+    for (auto& m : modality_tokens) {
+        int64_t n = m.dim(0);
+        std::memcpy(cd + offset * D, m.data<float>(), (size_t)(n * D) * sizeof(float));
+        offset += n;
+    }
+
+    Tensor logits = router.forward(combined);
+    float* ld = logits.data<float>();
+
+    Tensor mod_logits = modality_classifier.forward(combined);
+    Tensor mod_probs({total, 6});
+    math::softmax(mod_logits, mod_probs, 1);
+    const float* mp = mod_probs.data<float>();
+
+    for (int64_t t = 0; t < total; ++t) {
+        for (int64_t e = 0; e < E; ++e) {
+            int64_t exp_mod = e % 6;
+            ld[t * E + e] += 3.0f * mp[t * 6 + exp_mod];
+        }
+    }
+
+    Tensor probs({total, E});
+    math::softmax(logits, probs, 1);
+    const float* pd = probs.data<float>();
+
+    Tensor output({total, D});
+    output.zero_();
+    float* od = output.data<float>();
+    for (int64_t e = 0; e < E; ++e) {
+        Tensor expert_out = experts[(size_t)e].forward(combined);
+        const float* eo = expert_out.data<float>();
+        for (int64_t t = 0; t < total; ++t) {
+            float w = pd[t * E + e];
+            for (int64_t d = 0; d < D; ++d)
+                od[t * D + d] += w * eo[t * D + d];
+        }
+    }
+    return output;
+}
+
 } // namespace oil

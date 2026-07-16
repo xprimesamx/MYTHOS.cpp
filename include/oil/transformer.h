@@ -83,6 +83,9 @@ public:
     Activation activation;
     FFN() : activation(Activation::SiLU) {}
     explicit FFN(const TransformerConfig& cfg);
+    FFN(int64_t hidden, int64_t ffn_hidden)
+        : gate_proj(hidden, ffn_hidden), up_proj(hidden, ffn_hidden),
+          down_proj(ffn_hidden, hidden), activation(Activation::SiLU) {}
     Tensor forward(const Tensor& x) const;
 };
 

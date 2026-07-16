@@ -11,9 +11,12 @@ namespace oil {
 // ===========================================================================
 // D1: Paged attention — vLLM-style block-level KV cache management
 // ===========================================================================
-PagedAttention::PagedAttention(int64_t head_dim, int64_t n_heads, int64_t block_size)
-    : head_dim_(head_dim), n_heads_(n_heads), block_size_(block_size) {
-    for (int64_t i = 0; i < 256; i++) {
+PagedAttention::PagedAttention(int64_t head_dim, int64_t n_heads, int64_t block_size,
+                               int64_t max_blocks)
+    : head_dim_(head_dim), n_heads_(n_heads), block_size_(block_size),
+      max_blocks_(max_blocks), next_id_(0) {
+    int64_t reserve_count = std::min(max_blocks_, (int64_t)256);
+    for (int64_t i = 0; i < reserve_count; i++) {
         Block b;
         b.id = i;
         b.k = Tensor::zeros(Shape{1, n_heads, block_size, head_dim});
@@ -21,11 +24,22 @@ PagedAttention::PagedAttention(int64_t head_dim, int64_t n_heads, int64_t block_
         b.active = false;
         blocks_.push_back(b);
         free_ids_.push(i);
+        next_id_ = i + 1;
     }
 }
 
 PagedAttention::Block PagedAttention::alloc_block() {
-    if (free_ids_.empty()) return Block{-1, Tensor(), Tensor(), false};
+    if (free_ids_.empty()) {
+        if (next_id_ >= max_blocks_) return Block{-1, Tensor(), Tensor(), false};
+        int64_t id = next_id_++;
+        Block b;
+        b.id = id;
+        b.k = Tensor::zeros(Shape{1, n_heads_, block_size_, head_dim_});
+        b.v = Tensor::zeros(Shape{1, n_heads_, block_size_, head_dim_});
+        b.active = true;
+        blocks_.push_back(b);
+        return blocks_.back();
+    }
     int64_t id = free_ids_.front();
     free_ids_.pop();
     blocks_[(size_t)id].active = true;
@@ -154,7 +168,7 @@ std::vector<int> SpeculativeDecoder::generate(const std::vector<int>& prompt, in
         int gamma = (int)gamma_;
 
         std::vector<int> draft_tokens;
-        for (int g = 0; g < gamma; g++) {
+        for (int g = 0; g < gamma && (int)output.size() < max_tokens; g++) {
             Tensor input(Shape{1, 1});
             Tensor pos(Shape{1, 1});
             input.data<float>()[0] = (float)output.back();
@@ -167,15 +181,12 @@ std::vector<int> SpeculativeDecoder::generate(const std::vector<int>& prompt, in
                 draft_tokens.push_back(next);
                 output.push_back(next);
             } else {
-                logits = Tensor(Shape{1, 1, vocab});
+                Tensor logits(Shape{1, 1, vocab});
                 float* ld = logits.data<float>();
-                for (int v = 0; v < vocab; v++) ld[v] = (float)rand() / RAND_MAX;
-                const float* row = logits.data<float>();
-                int best = 0;
-                for (int v = 1; v < vocab; v++)
-                    if (row[v] > row[best]) best = v;
-                draft_tokens.push_back(best);
-                output.push_back(best);
+                for (int v = 0; v < vocab; v++) ld[v] = (float)v / (float)vocab;
+                int next = sampler_.sample(logits.data<float>(), vocab, sampler_cfg_);
+                draft_tokens.push_back(next);
+                output.push_back(next);
             }
         }
 
@@ -230,27 +241,21 @@ std::vector<int> SpeculativeDecoder::generate(const std::vector<int>& prompt, in
                 adjusted[(size_t)v] = std::max(0.0f, t_p - d_p);
                 adj_sum += adjusted[(size_t)v];
             }
-            if (adj_sum < 1e-10f) {
-                int best = 0;
-                for (int v = 1; v < vocab; v++)
-                    if (logits_row[v] > logits_row[best]) best = v;
-                output.push_back(best);
+            Tensor adj_logits(Shape{1, 1, vocab});
+            float* adj_ld = adj_logits.data<float>();
+            if (adj_sum > 1e-10f) {
+                for (int v = 0; v < vocab; v++)
+                    adj_ld[v] = adjusted[(size_t)v] / adj_sum;
             } else {
-                float r = (float)rand() / RAND_MAX * adj_sum;
-                float cum = 0;
-                for (int v = 0; v < vocab; v++) {
-                    cum += adjusted[(size_t)v];
-                    if (cum >= r) {
-                        output.push_back(v);
-                        break;
-                    }
-                }
+                for (int v = 0; v < vocab; v++)
+                    adj_ld[v] = logits_row[v];
             }
+            int replacement = sampler_.sample(adj_ld, vocab, sampler_cfg_);
+            output.push_back(replacement);
             all_accepted = false;
             acceptance_rate_ = total_count_ > 0 ? (float)accepted_count_ / total_count_ : 0.0f;
             break;
         }
-        if (!all_accepted) break;
     }
     acceptance_rate_ = total_count_ > 0 ? (float)accepted_count_ / total_count_ : 0.0f;
     return output;
@@ -993,7 +998,7 @@ Reranker::Reranker(Model* model) : model_(model) {}
 
 float Reranker::score(const std::string& query, const std::string& document) {
     auto* dm = dynamic_cast<DenseModel*>(model_);
-    if (!dm) return 0.5f;
+    if (!dm) return 0.0f;
 
     // Cross-encoder: concatenate query + document tokens
     auto q_ids = text_to_token_ids(query, (int)model_->vocab_size());

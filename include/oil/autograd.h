@@ -16,6 +16,33 @@ public:
     std::vector<Tensor> saved;
 };
 
+// Gradient checkpointing wrapper (Task 116).
+// Saves only the inputs and discards intermediate activations after forward.
+// During backward, the forward function is recomputed to regenerate the
+// intermediate values that the user-supplied backward callback needs.
+class CheckpointFn : public AutogradFunction {
+public:
+    using ForwardFn = std::function<std::vector<Tensor>(const std::vector<Tensor>&)>;
+    using BackwardFn = std::function<std::vector<Tensor>(const std::vector<Tensor>&,
+                                                         const std::vector<Tensor>&)>;
+    CheckpointFn(ForwardFn fwd, BackwardFn bwd)
+        : fwd_(std::move(fwd)), bwd_(std::move(bwd)) {}
+
+    std::vector<Tensor> forward(const std::vector<Tensor>& inputs) override {
+        saved = inputs;                 // keep only inputs; drop intermediates
+        return fwd_(inputs);
+    }
+
+    std::vector<Tensor> backward(const std::vector<Tensor>& grad_output) override {
+        auto recomputed = fwd_(saved);  // recompute forward to recover intermediates
+        return bwd_(grad_output, recomputed);
+    }
+
+private:
+    ForwardFn fwd_;
+    BackwardFn bwd_;
+};
+
 struct AutogradNode {
     std::shared_ptr<AutogradFunction> fn;
     std::vector<Tensor> inputs;
