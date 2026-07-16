@@ -33,25 +33,31 @@ private:
     int64_t next_id_;
 };
 
-// D2: Speculative decoding — draft model + verify
+// D2: Speculative decoding — draft model + verify + adaptive gamma
 class SpeculativeDecoder {
 public:
-    SpeculativeDecoder(Model* draft, Model* target, float gamma = 5.0f);
+    SpeculativeDecoder(Model* draft, Model* target, float gamma = 5.0f,
+                       float min_gamma = 1.0f, float max_gamma = 10.0f);
     std::vector<int> generate(const std::vector<int>& prompt, int max_tokens);
     float acceptance_rate() const { return acceptance_rate_; }
     int accepted_count() const { return accepted_count_; }
     int total_count() const { return total_count_; }
+    float current_gamma() const { return gamma_; }
 private:
     Model* draft_;
     Model* target_;
-    float gamma_;
+    float gamma_, min_gamma_, max_gamma_;
     Sampler sampler_;
     SamplerConfig sampler_cfg_;
     float acceptance_rate_ = 0.0f;
+    float acc_ema_ = 0.6f; // EWMA of acceptance rate for adaptive gamma
     int accepted_count_ = 0;
     int total_count_ = 0;
+    int adapt_interval_ = 10; // re-evaluate gamma every N calls
+    int calls_since_adapt_ = 0;
     bool verify_tokens(const std::vector<int>& draft_tokens,
                        const Tensor& target_logits, int vocab_size);
+    void adapt_gamma();
 };
 
 // D3: Continuous batching — dynamic request scheduling
@@ -130,13 +136,19 @@ private:
     bool is_quantized_ = false;
 };
 
-// D9: FP8 inference — FP8 GEMM forward pass
+// D9: FP8 inference — FP8 GEMM forward pass with two-stage residual accumulation (FA-3 style)
 class FP8Inference {
 public:
     FP8Inference(Model* model);
     Tensor forward(const Tensor& input, const Tensor& positions);
+    // Two-stage residual accumulation: dequant + residual tracking for long context
+    Tensor forward_two_stage(const Tensor& input, const Tensor& positions);
 private:
     Model* model_;
+    static constexpr int64_t BLOCK = 64;
+    void fp8_residual_accum(const float* src, const uint8_t* fp8_data,
+                            const float* scales, int64_t num_blocks,
+                            float* out, int64_t n);
 };
 
 // D10: Model sharding — split across devices and load only partial model

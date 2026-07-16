@@ -5,6 +5,7 @@
 #include <string>
 #include <vector>
 #include <fstream>
+#include <unordered_map>
 
 namespace oil {
 
@@ -46,6 +47,8 @@ public:
     void write_header(const OILHeader& hdr, const uint8_t* config_data);
     void write_format_table(const std::vector<FormatBlockEntry>& entries);
     void write_block(const BlockData& block);
+    // Content-addressed dedup write: returns offset, skips duplicate blobs
+    size_t write_dedup(const uint8_t* data, size_t size);
     void write_tensor_table(const std::vector<TensorEntry>& entries,
                             const std::vector<std::string>& names);
     void close();
@@ -53,6 +56,8 @@ public:
 private:
     std::ofstream file_;
     size_t data_start_;
+    struct BlobIndex { size_t offset; size_t size; };
+    std::unordered_map<std::string, BlobIndex> blob_index_; // hex_sha256 -> {offset, size}
 };
 
 class OILReader {

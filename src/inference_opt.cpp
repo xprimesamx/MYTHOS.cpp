@@ -109,11 +109,20 @@ Tensor PagedAttention::forward(const Tensor& Q, int64_t* block_table,
 // ===========================================================================
 // D2: Speculative decoding — draft model + verify with top-k/top-p sampling
 // ===========================================================================
-SpeculativeDecoder::SpeculativeDecoder(Model* draft, Model* target, float gamma)
-    : draft_(draft), target_(target), gamma_(gamma), sampler_(42) {
+SpeculativeDecoder::SpeculativeDecoder(Model* draft, Model* target, float gamma,
+                                       float min_gamma, float max_gamma)
+    : draft_(draft), target_(target), gamma_(gamma),
+      min_gamma_(min_gamma), max_gamma_(max_gamma), sampler_(42) {
     sampler_cfg_.temperature = 1.0f;
     sampler_cfg_.top_k = 40;
     sampler_cfg_.top_p = 0.9f;
+}
+
+void SpeculativeDecoder::adapt_gamma() {
+    acc_ema_ = 0.9f * acc_ema_ + 0.1f * acceptance_rate_;
+    float ratio = acc_ema_ / std::max(1.0f - acc_ema_, 1e-6f);
+    float new_gamma = std::round(5.0f * std::min(ratio, 5.0f));
+    gamma_ = std::max(min_gamma_, std::min(max_gamma_, new_gamma));
 }
 
 bool SpeculativeDecoder::verify_tokens(const std::vector<int>& draft_tokens,
@@ -255,6 +264,11 @@ std::vector<int> SpeculativeDecoder::generate(const std::vector<int>& prompt, in
             all_accepted = false;
             acceptance_rate_ = total_count_ > 0 ? (float)accepted_count_ / total_count_ : 0.0f;
             break;
+        }
+        calls_since_adapt_++;
+        if (calls_since_adapt_ >= adapt_interval_) {
+            adapt_gamma();
+            calls_since_adapt_ = 0;
         }
     }
     acceptance_rate_ = total_count_ > 0 ? (float)accepted_count_ / total_count_ : 0.0f;
@@ -682,7 +696,6 @@ Tensor FP8Inference::forward(const Tensor& input, const Tensor& positions) {
     int64_t n = input.numel();
     int64_t num_blocks = (n + KVCache::FP8_BLOCK_SIZE - 1) / KVCache::FP8_BLOCK_SIZE;
 
-    // FP8 quantize block-by-block
     std::vector<uint8_t> fp8_data((size_t)n);
     std::vector<float> scales((size_t)num_blocks);
     const float* src = input.data<float>();
@@ -694,7 +707,6 @@ Tensor FP8Inference::forward(const Tensor& input, const Tensor& positions) {
                                      &scales[(size_t)blk], blk_end - blk_start);
     }
 
-    // Dequantize back
     Tensor fp8_input(input.shape());
     float* dst = fp8_input.data<float>();
     for (int64_t blk = 0; blk < num_blocks; blk++) {
@@ -706,6 +718,63 @@ Tensor FP8Inference::forward(const Tensor& input, const Tensor& positions) {
 
     if (model_) return model_->forward(fp8_input, positions);
     return fp8_input;
+}
+
+void FP8Inference::fp8_residual_accum(const float* src, const uint8_t* fp8_data,
+                                       const float* scales, int64_t num_blocks,
+                                       float* out, int64_t n) {
+    std::vector<float> residual((size_t)n, 0.0f);
+    int64_t blk_size = KVCache::FP8_BLOCK_SIZE;
+    float* r = residual.data();
+    for (int64_t blk = 0; blk < num_blocks; blk++) {
+        int64_t blk_start = blk * blk_size;
+        int64_t blk_end = std::min(blk_start + blk_size, n);
+        int64_t count = blk_end - blk_start;
+        // dequant this block
+        float scale = scales[(size_t)blk];
+        const uint8_t* fp8_blk = fp8_data + (size_t)blk_start;
+        for (int64_t i = 0; i < count; i++) {
+            float deq = ((float)(int8_t)fp8_blk[i] - 0.0f) * scale / 127.0f + 0.0f;
+            // residual = original - dequantized (rounding error)
+            r[(size_t)(blk_start + i)] = src[(size_t)(blk_start + i)] - deq;
+            out[(size_t)(blk_start + i)] = deq;
+        }
+    }
+    // Accumulate running residual: add previous block's residual into current
+    // This absorbs the FP8 rounding error across blocks
+    float running_residual = 0.0f;
+    for (int64_t blk = 0; blk < num_blocks; blk++) {
+        int64_t blk_start = blk * blk_size;
+        int64_t blk_end = std::min(blk_start + blk_size, n);
+        for (int64_t i = blk_start; i < blk_end; i++) {
+            running_residual += r[(size_t)i];
+            out[(size_t)i] += running_residual * 0.5f; // dampened residual correction
+            running_residual *= 0.5f; // decay the residual
+        }
+    }
+}
+
+Tensor FP8Inference::forward_two_stage(const Tensor& input, const Tensor& positions) {
+    int64_t n = input.numel();
+    int64_t num_blocks = (n + KVCache::FP8_BLOCK_SIZE - 1) / KVCache::FP8_BLOCK_SIZE;
+
+    std::vector<uint8_t> fp8_data((size_t)n);
+    std::vector<float> scales((size_t)num_blocks);
+    const float* src = input.data<float>();
+
+    for (int64_t blk = 0; blk < num_blocks; blk++) {
+        int64_t blk_start = blk * KVCache::FP8_BLOCK_SIZE;
+        int64_t blk_end = std::min(blk_start + KVCache::FP8_BLOCK_SIZE, n);
+        KVCache::quantize_fp8_block(src + blk_start, fp8_data.data() + blk_start,
+                                     &scales[(size_t)blk], blk_end - blk_start);
+    }
+
+    Tensor result(input.shape());
+    float* dst = result.data<float>();
+    fp8_residual_accum(src, fp8_data.data(), scales.data(), num_blocks, dst, n);
+
+    if (model_) return model_->forward(result, positions);
+    return result;
 }
 
 // ===========================================================================

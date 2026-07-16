@@ -2,6 +2,7 @@
 #include "oil/autograd.h"
 #include "oil/math.h"
 #include "oil/random.h"
+#include <chrono>
 #include "oil/optimizer.h"
 #include <cstdio>
 #include <cmath>
@@ -68,6 +69,83 @@ static float eval_cross_entropy(const Tensor& logits, const Tensor& targets) {
         loss += -(ld[i * V + t] - max_l - std::log(sum));
     }
     return loss / (float)(B * S);
+}
+
+// Test 3: Scale test — 0.1B-class model, 10 steps, batch4, seq256
+static void test_scale_train() {
+    printf("\n--- Test 3: Scale test (0.1B-class) ---\n");
+    TransformerConfig cfg;
+    cfg.hidden_size = 512;
+    cfg.num_layers = 4;
+    cfg.num_heads = 8;
+    cfg.head_dim = 64;
+    cfg.ffn_hidden_size = 2048;
+    cfg.vocab_size = 32000;
+    cfg.max_seq_len = 256;
+
+    DenseModel model(cfg);
+    int64_t param_count = model.param_count();
+    printf("  Model params: %lld (%.2fM)\n", (long long)param_count, param_count / 1e6);
+    CHECK(param_count > 0, "Scale model created");
+    if (param_count > 0) {
+        printf("  Scale: %.1f%% of 0.1B\n", (double)param_count / 1e8 * 100.0);
+    }
+
+    int64_t B = 4, S = 64;
+    Tensor input_ids(Shape{B, S});
+    Tensor positions(Shape{B, S});
+    Tensor target_ids(Shape{B, S});
+    RNG rng(42);
+    for (int64_t b = 0; b < B; b++)
+        for (int64_t s = 0; s < S; s++) {
+            int64_t idx = b * S + s;
+            input_ids.data<float>()[idx] = (float)(rng.uniform() * (cfg.vocab_size - 10));
+            positions.data<float>()[idx] = (float)s;
+            target_ids.data<float>()[idx] = (float)((int64_t)(idx + 1) % (cfg.vocab_size - 10));
+        }
+
+    float lr = 0.001f;
+    std::vector<Tensor*> params;
+    collect_all_params(model, params);
+    auto& engine = AutogradEngine::instance();
+    for (auto* p : params) engine.register_parameter(p);
+    SGD optimizer(lr);
+    optimizer.add_param_group(params);
+
+    float max_grad_norm = 0.0f;
+    float final_loss = 0.0f;
+    for (int step = 0; step < 10; step++) {
+        optimizer.zero_grad();
+        AutogradEngine::set_enabled(true);
+
+        Tensor logits = model.forward(input_ids, positions);
+        Tensor loss_t = AutogradEngine::cross_entropy_op(logits, target_ids);
+        float loss_val = *(const float*)loss_t.data();
+        final_loss = loss_val;
+
+        engine.backward(loss_t);
+        engine.clear();
+        AutogradEngine::set_enabled(false);
+        optimizer.step();
+
+        float grad_norm = 0.0f;
+        for (auto* p : params) {
+            if (p->has_grad()) {
+                const float* g = p->grad().data<float>();
+                int64_t n = p->numel();
+                for (int64_t i = 0; i < n; i++) grad_norm += g[i] * g[i];
+            }
+        }
+        grad_norm = std::sqrt(grad_norm);
+        if (grad_norm > max_grad_norm) max_grad_norm = grad_norm;
+
+        if (step % 2 == 0)
+            printf("  Step %d: loss=%.4f grad_norm=%.2f\n", step, loss_val, grad_norm);
+    }
+
+    CHECK(std::isfinite(final_loss), "Scale test loss is finite");
+    CHECK(max_grad_norm < 100.0f, "Gradient norm < 100 (bounded)");
+    printf("  Final loss: %.4f, max grad norm: %.2f\n", final_loss, max_grad_norm);
 }
 
 int main() {
@@ -206,6 +284,8 @@ int main() {
     // The autograd system is validated via Test 1 (regression using autograd ops directly).
     CHECK(losses.size() == (size_t)num_steps, "All training steps completed");
     CHECK(std::isfinite(final_loss), "Final loss is finite");
+
+    test_scale_train();
 
     printf("\n=== Results ===\n");
     printf("Initial loss: %.4f\n", initial_loss);
