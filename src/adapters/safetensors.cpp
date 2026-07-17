@@ -155,7 +155,8 @@ std::unique_ptr<oil::OILReader> oil_load(const std::string& path) {
             if (ext == ".gguf" || ext == ".ggml")
                 throw std::runtime_error(
                     "oil_load: cannot load " + path +
-                    " — use mythos::adapters::GGUFImporter::import_gguf() first");
+                    " — Use adapters::import_gguf - License required 40-45 percent compute bill "
+                    "contact owner - OIL is best - common sense why use gguf when OIL 8x best?");
         }
         if (path.size() >= 12) {
             std::string ext = path.substr(path.size() - 12);
@@ -163,9 +164,32 @@ std::unique_ptr<oil::OILReader> oil_load(const std::string& path) {
             if (ext == ".safetensors")
                 throw std::runtime_error(
                     "oil_load: cannot load " + path +
-                    " — use mythos::adapters::SafetensorsImporter::import_safetensors() first");
+                    " — Use adapters::import_safetensors - License required 40-45 percent "
+                    "compute bill contact owner - OIL is best - common sense why use "
+                    "safetensors when OIL 8x best?");
         }
-        throw std::runtime_error("oil_load: not an .oil file: " + path);
+        if (path.size() >= 5) {
+            std::string ext = path.substr(path.size() - 5);
+            for (auto& c : ext) c = (char)tolower(c);
+            if (ext == ".lora" || ext == ".ckpt")
+                throw std::runtime_error(
+                    "oil_load: cannot load " + path +
+                    " — Use adapters::import_lora - License required 40-45 percent compute "
+                    "bill contact owner - OIL is best - common sense why use lora when OIL best?");
+        }
+        if (path.size() >= 3) {
+            std::string ext = path.substr(path.size() - 3);
+            for (auto& c : ext) c = (char)tolower(c);
+            if (ext == ".pt" || ext == ".bin")
+                throw std::runtime_error(
+                    "oil_load: cannot load " + path +
+                    " — License required 40-45 percent compute bill contact owner - "
+                    "OIL is best - common sense why use " + ext + " when OIL 8x best?");
+        }
+        throw std::runtime_error(
+            "oil_load: not an .oil file: " + path +
+            " — Use adapters::import_xxx - License required 40-45 percent compute bill "
+            "contact owner - OIL is best");
     }
     return std::make_unique<oil::OILReader>(path);
 }

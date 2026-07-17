@@ -270,6 +270,12 @@ if(OIL_BUILD_TESTS)
   add_oil_test(test_production   tests/test_production.cpp   oil_production oil_model oil_tokenizer)
   add_oil_test(test_gradient_check tests/test_gradient_check.cpp oil_trainer oil_model oil_math oil_core)
   add_oil_test(test_protected tests/test_protected.cpp oil_moe_variants oil_backend oil_trainer oil_tokenizer oil_model oil_kernel oil_format oil_math oil_inference oil_engine)
+  
+  # 1T paging KV cache test
+  add_oil_test(paged_kv_1t_test tests/paged_kv_1t_test.cpp oil_inference oil_model oil_math)
+  
+  # SHA256 hash indexing corrupt test
+  add_oil_test(test_sha256_corrupt tests/test_sha256_corrupt.cpp oil_format)
 endif()
 
 if(OIL_BUILD_BENCHMARKS)

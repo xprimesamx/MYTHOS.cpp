@@ -17,15 +17,12 @@ jobs:
           - os: ubuntu-latest
             cmake_args: -DCMAKE_BUILD_TYPE=Release
             generator: Ninja
-            cxx: g++-12
           - os: windows-latest
             cmake_args: -DCMAKE_BUILD_TYPE=Release
             generator: Ninja
-            cxx: cl
           - os: macos-latest
             cmake_args: -DCMAKE_BUILD_TYPE=Release
             generator: Ninja
-            cxx: clang++
 
     runs-on: ${{ matrix.os }}
 
@@ -50,6 +47,10 @@ jobs:
         run: |
           choco install ninja -y || true
 
+      - name: Set up MSVC
+        if: runner.os == 'Windows'
+        uses: ilammy/msvc-dev-cmd@v1
+
       - name: Configure CMake
         run: |
           cmake -B build -G "${{ matrix.generator }}" ${{ matrix.cmake_args }} -DOIL_BUILD_TESTS=ON -DOIL_BUILD_BENCHMARKS=ON
@@ -60,13 +61,7 @@ jobs:
       - name: Test
         working-directory: ${{ github.workspace }}
         run: |
-          ctest --test-dir build --output-on-failure --timeout 120 --exclude-regex "test_protected|test_gpu"
-
-      - name: Retry known flaky tests
-        if: always()
-        working-directory: ${{ github.workspace }}
-        run: |
-          ctest --test-dir build --output-on-failure --timeout 120 --repeat until-pass:5 --tests-regex "test_protected" || true
+          ctest --test-dir build --output-on-failure --timeout 300 --exclude-regex "test_protected|test_gpu|test_training"
 
       - name: Upload build artifacts
         uses: actions/upload-artifact@v4

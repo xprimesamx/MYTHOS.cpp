@@ -2,6 +2,9 @@
 #include <cstring>
 #include <cmath>
 #include <algorithm>
+#include <fstream>
+#include <sstream>
+#include <cstdio>
 
 namespace oil {
 
@@ -230,6 +233,397 @@ void KVCache::resize(int64_t new_max_seq_len) {
         c.k_scales.resize((size_t)num_blocks);
         c.v_scales.resize((size_t)num_blocks);
     }
+}
+
+// ===========================================================================
+// PagedKVCache1T — 1T to unlimited hierarchical paging implementation
+// ===========================================================================
+
+PagedKVCache1T::L3Table::L3Table() {
+    for (int i = 0; i < TABLE_ENTRIES; i++) entries[i] = -1;
+}
+
+PagedKVCache1T::L2Table::L2Table() {
+    for (int i = 0; i < TABLE_ENTRIES; i++) entries[i] = nullptr;
+}
+
+PagedKVCache1T::L2Table::~L2Table() {
+    for (int i = 0; i < TABLE_ENTRIES; i++) delete entries[i];
+}
+
+PagedKVCache1T::L1Table::L1Table() {
+    for (int i = 0; i < TABLE_ENTRIES; i++) entries[i] = nullptr;
+}
+
+PagedKVCache1T::L1Table::~L1Table() {
+    for (int i = 0; i < TABLE_ENTRIES; i++) delete entries[i];
+}
+
+PagedKVCache1T::PagedKVCache1T(int num_layers, int64_t num_heads, int64_t head_dim,
+                                int64_t block_size, size_t physical_memory_bytes,
+                                const std::string& disk_path)
+    : num_layers_(num_layers), num_heads_(num_heads), head_dim_(head_dim),
+      block_size_(block_size), physical_memory_limit_(physical_memory_bytes),
+      current_memory_used_(0), disk_path_(disk_path), access_counter_(0),
+      next_block_id_(0)
+{
+    layers_.resize(num_layers);
+    for (int i = 0; i < num_layers; i++) {
+        layers_[i].root = new L1Table();
+        layers_[i].current_pos = 0;
+    }
+}
+
+PagedKVCache1T::~PagedKVCache1T() {
+    for (auto& ls : layers_) {
+        delete ls.root;
+    }
+}
+
+int64_t PagedKVCache1T::tokens_per_block() const {
+    return block_size_;
+}
+
+int64_t PagedKVCache1T::max_logical_tokens_per_layer() const {
+    return TABLE_ENTRIES * TABLE_ENTRIES * TABLE_ENTRIES * block_size_;
+}
+
+int64_t PagedKVCache1T::logical_capacity() const {
+    return max_logical_tokens_per_layer();
+}
+
+int64_t PagedKVCache1T::num_physical_blocks() const {
+    int64_t total = 0;
+    for (auto& ls : layers_) total += (int64_t)ls.blocks.size();
+    return total;
+}
+
+int64_t PagedKVCache1T::num_disk_blocks() const {
+    int64_t total = 0;
+    for (auto& ls : layers_) {
+        for (auto& [id, blk] : ls.blocks) {
+            if (blk.on_disk) total++;
+        }
+    }
+    return total;
+}
+
+size_t PagedKVCache1T::physical_memory_used() const {
+    return current_memory_used_;
+}
+
+size_t PagedKVCache1T::physical_memory_limit() const {
+    return physical_memory_limit_;
+}
+
+int PagedKVCache1T::context_len() const {
+    return layers_.empty() ? 0 : (int)layers_[0].current_pos;
+}
+
+int64_t PagedKVCache1T::resolve_block_id(int layer, int64_t logical_pos) const {
+    if (layer < 0 || layer >= num_layers_) return -1;
+    int64_t block_idx = logical_pos / block_size_;
+    int64_t l1_idx = block_idx / (TABLE_ENTRIES * TABLE_ENTRIES);
+    int64_t rem = block_idx % (TABLE_ENTRIES * TABLE_ENTRIES);
+    int64_t l2_idx = rem / TABLE_ENTRIES;
+    int64_t l3_idx = rem % TABLE_ENTRIES;
+
+    if (l1_idx >= TABLE_ENTRIES) return -1;
+
+    const auto& ls = layers_[layer];
+    L2Table* l2 = ls.root->entries[(size_t)l1_idx];
+    if (!l2) return -1;
+    L3Table* l3 = l2->entries[(size_t)l2_idx];
+    if (!l3) return -1;
+    return l3->entries[(size_t)l3_idx];
+}
+
+int64_t PagedKVCache1T::alloc_block_id(int layer, int64_t logical_pos) {
+    int64_t block_idx = logical_pos / block_size_;
+    int64_t l1_idx = block_idx / (TABLE_ENTRIES * TABLE_ENTRIES);
+    int64_t rem = block_idx % (TABLE_ENTRIES * TABLE_ENTRIES);
+    int64_t l2_idx = rem / TABLE_ENTRIES;
+    int64_t l3_idx = rem % TABLE_ENTRIES;
+
+    if (l1_idx >= TABLE_ENTRIES) return -1;
+
+    auto& ls = layers_[layer];
+    L2Table*& l2 = ls.root->entries[(size_t)l1_idx];
+    if (!l2) l2 = new L2Table();
+    L3Table*& l3 = l2->entries[(size_t)l2_idx];
+    if (!l3) l3 = new L3Table();
+
+    int64_t id = next_block_id_++;
+    l3->entries[(size_t)l3_idx] = id;
+
+    PhysicalBlock blk;
+    blk.id = id;
+    int64_t per_block_floats = num_heads_ * block_size_ * head_dim_;
+    blk.k_data.resize((size_t)per_block_floats, 0.0f);
+    blk.v_data.resize((size_t)per_block_floats, 0.0f);
+    blk.last_access = ++access_counter_;
+
+    size_t block_bytes = (size_t)per_block_floats * 2 * sizeof(float);
+    while (current_memory_used_ + block_bytes > physical_memory_limit_ && !ls.blocks.empty()) {
+        evict_lru(layer);
+    }
+
+    ls.blocks[id] = std::move(blk);
+    current_memory_used_ += block_bytes;
+    return id;
+}
+
+void PagedKVCache1T::offload_to_disk(int layer, int64_t block_id) {
+    auto& ls = layers_[layer];
+    auto it = ls.blocks.find(block_id);
+    if (it == ls.blocks.end()) return;
+    auto& blk = it->second;
+    if (blk.on_disk) return;
+
+    std::string path = block_disk_path(layer, block_id);
+    std::ofstream ofs(path, std::ios::binary);
+    if (!ofs) return;
+
+    int64_t ksize = (int64_t)blk.k_data.size();
+    int64_t vsize = (int64_t)blk.v_data.size();
+    ofs.write((const char*)&ksize, sizeof(ksize));
+    ofs.write((const char*)blk.k_data.data(), ksize * sizeof(float));
+    ofs.write((const char*)&vsize, sizeof(vsize));
+    ofs.write((const char*)blk.v_data.data(), vsize * sizeof(float));
+    ofs.close();
+
+    int64_t per_block_floats = num_heads_ * block_size_ * head_dim_;
+    size_t block_bytes = (size_t)per_block_floats * 2 * sizeof(float);
+    current_memory_used_ -= block_bytes;
+
+    blk.k_data.clear();
+    blk.v_data.clear();
+    blk.k_data.shrink_to_fit();
+    blk.v_data.shrink_to_fit();
+    blk.on_disk = true;
+    blk.disk_file = path;
+}
+
+void PagedKVCache1T::load_from_disk(int layer, int64_t block_id) const {
+    auto& ls = layers_[layer];
+    auto it = ls.blocks.find(block_id);
+    if (it == ls.blocks.end()) return;
+    auto& blk = it->second;
+    if (!blk.on_disk) return;
+
+    std::ifstream ifs(blk.disk_file, std::ios::binary);
+    if (!ifs) return;
+
+    int64_t ksize, vsize;
+    ifs.read((char*)&ksize, sizeof(ksize));
+    blk.k_data.resize((size_t)ksize);
+    ifs.read((char*)blk.k_data.data(), ksize * sizeof(float));
+    ifs.read((char*)&vsize, sizeof(vsize));
+    blk.v_data.resize((size_t)vsize);
+    ifs.read((char*)blk.v_data.data(), vsize * sizeof(float));
+    ifs.close();
+
+    blk.on_disk = false;
+    int64_t per_block_floats = num_heads_ * block_size_ * head_dim_;
+    size_t block_bytes = (size_t)per_block_floats * 2 * sizeof(float);
+    const_cast<size_t&>(current_memory_used_) += block_bytes;
+    std::remove(blk.disk_file.c_str());
+    blk.disk_file.clear();
+}
+
+void PagedKVCache1T::evict_lru(int layer) {
+    auto& ls = layers_[layer];
+    if (ls.blocks.empty()) return;
+
+    int64_t lru_id = -1;
+    int64_t oldest_access = INT64_MAX;
+    for (auto& [id, blk] : ls.blocks) {
+        if (!blk.on_disk && blk.last_access < oldest_access) {
+            oldest_access = blk.last_access;
+            lru_id = id;
+        }
+    }
+    if (lru_id >= 0) {
+        offload_to_disk(layer, lru_id);
+    }
+}
+
+std::string PagedKVCache1T::block_disk_path(int layer, int64_t block_id) const {
+    std::ostringstream ss;
+    if (!disk_path_.empty()) {
+        ss << disk_path_;
+        if (disk_path_.back() != '/' && disk_path_.back() != '\\')
+            ss << "/";
+    } else {
+#ifdef _WIN32
+        const char* tmp = std::getenv("TEMP");
+        ss << (tmp ? tmp : "C:\\Temp") << "\\mythos_paged_kv\\";
+#else
+        ss << "/tmp/mythos_paged_kv/";
+#endif
+    }
+    ss << "paged_kv_l" << layer << "_b" << block_id << ".bin";
+    return ss.str();
+}
+
+void PagedKVCache1T::append(int layer, int64_t logical_pos, const Tensor& k, const Tensor& v) {
+    if (layer < 0 || layer >= num_layers_) return;
+
+    int64_t block_id = resolve_block_id(layer, logical_pos);
+    if (block_id < 0) {
+        block_id = alloc_block_id(layer, logical_pos);
+        if (block_id < 0) return;
+    }
+
+    auto& ls = layers_[layer];
+    auto it = ls.blocks.find(block_id);
+    if (it == ls.blocks.end()) return;
+    auto& blk = it->second;
+
+    if (blk.on_disk) {
+        load_from_disk(layer, block_id);
+    }
+    blk.last_access = ++access_counter_;
+    blk.dirty = true;
+
+    int64_t offset_in_block = logical_pos % block_size_;
+    int64_t k_num = k.numel();
+    int64_t v_num = v.numel();
+    int64_t max_floats = num_heads_ * block_size_ * head_dim_;
+
+    const float* ksrc = k.data<float>();
+    const float* vsrc = v.data<float>();
+
+    int64_t write_offset = offset_in_block * num_heads_ * head_dim_;
+    int64_t copy_k = std::min(k_num, max_floats - write_offset);
+    int64_t copy_v = std::min(v_num, max_floats - write_offset);
+
+    if (copy_k > 0) std::memcpy(blk.k_data.data() + write_offset, ksrc, (size_t)copy_k * sizeof(float));
+    if (copy_v > 0) std::memcpy(blk.v_data.data() + write_offset, vsrc, (size_t)copy_v * sizeof(float));
+
+    if (logical_pos + 1 > ls.current_pos) ls.current_pos = logical_pos + 1;
+}
+
+std::pair<Tensor, Tensor> PagedKVCache1T::get_block(int layer, int64_t logical_pos) const {
+    int64_t block_id = resolve_block_id(layer, logical_pos);
+    if (block_id < 0) return {Tensor(), Tensor()};
+
+    auto& ls = layers_[layer];
+    auto it = ls.blocks.find(block_id);
+    if (it == ls.blocks.end()) return {Tensor(), Tensor()};
+    auto& blk = it->second;
+
+    if (blk.on_disk) {
+        load_from_disk(layer, block_id);
+    }
+    blk.last_access = ++access_counter_;
+
+    int64_t per_head = block_size_ * head_dim_;
+    Tensor k_out(Shape{1, num_heads_, block_size_, head_dim_});
+    Tensor v_out(Shape{1, num_heads_, block_size_, head_dim_});
+
+    std::memcpy(k_out.data<float>(), blk.k_data.data(), (size_t)num_heads_ * per_head * sizeof(float));
+    std::memcpy(v_out.data<float>(), blk.v_data.data(), (size_t)num_heads_ * per_head * sizeof(float));
+
+    return {k_out, v_out};
+}
+
+std::pair<Tensor, Tensor> PagedKVCache1T::get_range(int layer, int64_t start, int64_t end) const {
+    if (layer < 0 || layer >= num_layers_) return {Tensor(), Tensor()};
+    if (start < 0) start = 0;
+    int64_t current = layers_[layer].current_pos;
+    if (end > current) end = current;
+    if (end <= start) return {Tensor(), Tensor()};
+
+    int64_t len = end - start;
+    Tensor k_out(Shape{1, num_heads_, len, head_dim_});
+    Tensor v_out(Shape{1, num_heads_, len, head_dim_});
+
+    for (int64_t pos = start; pos < end; pos++) {
+        int64_t block_id = resolve_block_id(layer, pos);
+        if (block_id < 0) continue;
+
+        auto& ls = layers_[layer];
+        auto it = ls.blocks.find(block_id);
+        if (it == ls.blocks.end()) continue;
+        auto& blk = it->second;
+
+        if (blk.on_disk) {
+            load_from_disk(layer, block_id);
+        }
+        blk.last_access = ++access_counter_;
+
+        int64_t offset_in_block = pos % block_size_;
+        int64_t head_offset = offset_in_block * num_heads_ * head_dim_;
+        int64_t out_offset = (pos - start) * num_heads_ * head_dim_;
+        int64_t copy_n = num_heads_ * head_dim_;
+        int64_t max_floats = num_heads_ * block_size_ * head_dim_;
+        if (head_offset + copy_n > max_floats) copy_n = max_floats - head_offset;
+
+        std::memcpy(k_out.data<float>() + out_offset, blk.k_data.data() + head_offset, (size_t)copy_n * sizeof(float));
+        std::memcpy(v_out.data<float>() + out_offset, blk.v_data.data() + head_offset, (size_t)copy_n * sizeof(float));
+    }
+
+    return {k_out, v_out};
+}
+
+void PagedKVCache1T::flush_to_disk() {
+    for (int layer = 0; layer < num_layers_; layer++) {
+        auto& ls = layers_[layer];
+        std::vector<int64_t> to_offload;
+        for (auto& [id, blk] : ls.blocks) {
+            if (!blk.on_disk && blk.dirty) to_offload.push_back(id);
+        }
+        for (int64_t id : to_offload) offload_to_disk(layer, id);
+    }
+}
+
+void PagedKVCache1T::load_from_disk() {
+    for (int layer = 0; layer < num_layers_; layer++) {
+        auto& ls = layers_[layer];
+        for (auto& [id, blk] : ls.blocks) {
+            if (blk.on_disk) load_from_disk(layer, id);
+        }
+    }
+}
+
+void PagedKVCache1T::clear() {
+    for (auto& ls : layers_) {
+        for (auto& [id, blk] : ls.blocks) {
+            if (blk.on_disk && !blk.disk_file.empty()) {
+                std::remove(blk.disk_file.c_str());
+            }
+        }
+        ls.blocks.clear();
+        ls.current_pos = 0;
+        delete ls.root;
+        ls.root = new L1Table();
+    }
+    current_memory_used_ = 0;
+    next_block_id_ = 0;
+    access_counter_ = 0;
+}
+
+bool PagedKVCache1T::verify_retrieval(int layer, int64_t pos,
+                                       const Tensor& expected_k,
+                                       const Tensor& expected_v) const {
+    auto [k, v] = get_range(layer, pos, pos + 1);
+    if (k.numel() == 0 || v.numel() == 0) return false;
+
+    const float* kd = k.data<float>();
+    const float* vd = v.data<float>();
+    const float* ek = expected_k.data<float>();
+    const float* ev = expected_v.data<float>();
+
+    int64_t n = std::min(k.numel(), expected_k.numel());
+    for (int64_t i = 0; i < n; i++) {
+        if (std::fabs(kd[i] - ek[i]) > 1e-5f) return false;
+    }
+    n = std::min(v.numel(), expected_v.numel());
+    for (int64_t i = 0; i < n; i++) {
+        if (std::fabs(vd[i] - ev[i]) > 1e-5f) return false;
+    }
+    return true;
 }
 
 } // namespace oil
