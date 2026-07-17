@@ -126,12 +126,12 @@ public:
 private:
     struct PhysicalBlock {
         int64_t id = -1;
-        std::vector<float> k_data;
-        std::vector<float> v_data;
+        mutable std::vector<float> k_data;
+        mutable std::vector<float> v_data;
         bool dirty = false;
-        int64_t last_access = 0;
-        bool on_disk = false;
-        std::string disk_file;
+        mutable int64_t last_access = 0;
+        mutable bool on_disk = false;
+        mutable std::string disk_file;
     };
 
     struct L3Table {
@@ -162,7 +162,7 @@ private:
     int64_t head_dim_;
     int64_t block_size_;
     size_t physical_memory_limit_;
-    size_t current_memory_used_;
+    mutable size_t current_memory_used_;
     std::string disk_path_;
     std::vector<LayerState> layers_;
     mutable int64_t access_counter_;

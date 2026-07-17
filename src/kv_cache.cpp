@@ -426,7 +426,7 @@ void PagedKVCache1T::load_from_disk(int layer, int64_t block_id) const {
     blk.on_disk = false;
     int64_t per_block_floats = num_heads_ * block_size_ * head_dim_;
     size_t block_bytes = (size_t)per_block_floats * 2 * sizeof(float);
-    const_cast<size_t&>(current_memory_used_) += block_bytes;
+    current_memory_used_ += block_bytes;
     std::remove(blk.disk_file.c_str());
     blk.disk_file.clear();
 }
