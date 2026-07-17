@@ -1534,6 +1534,21 @@ static std::string read_file_contents(const fs::path& path) {
                        std::istreambuf_iterator<char>());
 }
 
+static std::string escape_path(const std::string& p) {
+#ifdef _WIN32
+    return "\"" + p + "\"";
+#else
+    std::string escaped = p;
+    for (size_t i = 0; i < escaped.size(); i++) {
+        if (escaped[i] == ' ' || escaped[i] == '(' || escaped[i] == ')' ||
+            escaped[i] == '&' || escaped[i] == '|' || escaped[i] == ';') {
+            escaped.insert(escaped.begin() + i, '\\');
+            i++;
+        }
+    }
+    return escaped;
+#endif
+}
 
 
 // ========================================================================

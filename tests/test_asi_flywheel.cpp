@@ -35,6 +35,17 @@ static std::string read_file(const std::string& path) {
 static void test_sandbox_compile_run() {
     printf("\n=== Test 1: Sandbox compile and run ===\n");
 
+    // Skip if g++ not available (e.g. Windows MSVC CI)
+#ifdef _WIN32
+    bool has_gpp = (std::system("g++ --version > nul 2>&1") == 0);
+#else
+    bool has_gpp = (std::system("g++ --version > /dev/null 2>&1") == 0);
+#endif
+    if (!has_gpp) {
+        printf("  SKIP: g++ not available\n");
+        return;
+    }
+
     auto tmp = fs::temp_directory_path() / "mythos_sandbox_test";
     fs::create_directories(tmp);
     std::string src = (tmp / "test_prog.cpp").string();
@@ -83,6 +94,16 @@ static void test_sandbox_compile_run() {
 // ========================================================================
 static void test_sandbox_compile_failure() {
     printf("\n=== Test 2: Sandbox compile failure detection ===\n");
+
+#ifdef _WIN32
+    bool has_gpp = (std::system("g++ --version > nul 2>&1") == 0);
+#else
+    bool has_gpp = (std::system("g++ --version > /dev/null 2>&1") == 0);
+#endif
+    if (!has_gpp) {
+        printf("  SKIP: g++ not available\n");
+        return;
+    }
 
     auto tmp = fs::temp_directory_path() / "mythos_sandbox_fail";
     fs::create_directories(tmp);
