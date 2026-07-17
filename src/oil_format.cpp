@@ -2,7 +2,6 @@
 #include <cstring>
 #include <vector>
 #include <string>
-#include <cstdio>
 
 #if defined(_WIN32)
 #include <windows.h>
@@ -15,13 +14,6 @@ namespace oil {
 // ===========================================================================
 
 namespace {
-
-// Disable MSVC /GS buffer security check for SHA-256 functions.
-// The large uint32_t w[64] (256 bytes) in sha256_block triggers a false-positive
-// stack buffer overrun detection (0xc0000409) under MSVC /O2 + /GS.
-#ifdef _MSC_VER
-#pragma optimize("gs", off)
-#endif
 
 struct SHA256Ctx {
     uint32_t state[8];
@@ -118,10 +110,6 @@ SHA256Hash sha256(const uint8_t* data, size_t len) {
     return h;
 }
 
-#ifdef _MSC_VER
-#pragma optimize("gs", on)
-#endif
-
 } // namespace
 
 #if defined(_WIN32)
@@ -132,7 +120,7 @@ public:
     ~MappedFile() { close(); }
 
     bool open(const char* path) {
-        hFile = CreateFileA(path, GENERIC_READ, FILE_SHARE_READ, NULL,
+        hFile = CreateFileA(path, GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_DELETE, NULL,
                            OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
         if (hFile == INVALID_HANDLE_VALUE) return false;
 
