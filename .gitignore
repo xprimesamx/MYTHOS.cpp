@@ -62,3 +62,11 @@ checkpoints/
 
 # Kilo temp
 .kilo/tmp/
+
+# Excluded files
+TASKS.md
+DIFFUSION.txt
+build_linux.sh
+
+# Linux binaries
+dist/linux/
