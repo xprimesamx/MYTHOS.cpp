@@ -72,12 +72,12 @@ static uint32_t read_le_u32(std::istream& is) {
     is.read(reinterpret_cast<char*>(&v), 4);
     return v;
 }
-static uint16_t read_le_u16(std::istream& is) {
+[[maybe_unused]] static uint16_t read_le_u16(std::istream& is) {
     uint16_t v = 0;
     is.read(reinterpret_cast<char*>(&v), 2);
     return v;
 }
-static uint8_t read_u8(std::istream& is) {
+[[maybe_unused]] static uint8_t read_u8(std::istream& is) {
     uint8_t v = 0;
     is.read(reinterpret_cast<char*>(&v), 1);
     return v;
@@ -484,7 +484,7 @@ static bool convert_gguf(const std::string& in_path, const std::string& out_path
     if (use_compression) {
         std::vector<oil::TensorEntry> t_entries;
         std::vector<std::string> t_names;
-        size_t cursor = 0;
+        size_t cursor = 0; (void)cursor;
         for (size_t i = 0; i < all_names.size(); i++) {
             oil::TensorEntry te;
             te.name_len = (uint32_t)all_names[i].size();

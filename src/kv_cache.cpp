@@ -152,7 +152,7 @@ std::pair<Tensor, Tensor> KVCache::get_range(int layer, int start, int end) cons
                 for (int64_t i = 0; i < d; i++) {
                     int64_t off = read_off + i;
                     int64_t bi = off / FP8_BLOCK_SIZE;
-                    int64_t bo = off % FP8_BLOCK_SIZE;
+                    int64_t bo = off % FP8_BLOCK_SIZE; (void)bo;
                     kdst[write_off + i] = (float)(int8_t)c.k_quant[(size_t)off] * c.k_scales[(size_t)bi];
                     vdst[write_off + i] = (float)(int8_t)c.v_quant[(size_t)off] * c.v_scales[(size_t)bi];
                 }

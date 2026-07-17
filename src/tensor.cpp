@@ -94,8 +94,9 @@ Tensor::~Tensor() {
 
 Tensor::Tensor(const Tensor& other)
     : shape_(other.shape_), dtype_(other.dtype_), buffer_(other.buffer_),
-      offset_(other.offset_), strides_(other.strides_),
-      requires_grad_(other.requires_grad_), is_transposed_(other.is_transposed_)
+      requires_grad_(other.requires_grad_),
+      offset_(other.offset_), is_transposed_(other.is_transposed_),
+      strides_(other.strides_)
 {
     if (other.grad_) {
         grad_ = new Tensor(*other.grad_);
@@ -126,9 +127,9 @@ Tensor& Tensor::operator=(const Tensor& other) {
 Tensor::Tensor(Tensor&& other) noexcept
     : shape_(other.shape_), dtype_(other.dtype_),
       buffer_(std::move(other.buffer_)),
-      offset_(other.offset_), strides_(std::move(other.strides_)),
       requires_grad_(other.requires_grad_), grad_(other.grad_),
-      is_transposed_(other.is_transposed_)
+      offset_(other.offset_), is_transposed_(other.is_transposed_),
+      strides_(std::move(other.strides_))
 {
     other.grad_ = nullptr;
     other.offset_ = 0;

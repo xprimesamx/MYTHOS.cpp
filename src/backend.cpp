@@ -340,7 +340,7 @@ public:
             C.zero_();
             for (int64_t mt = 0; mt < M; mt += tile_m) {
                 int64_t m_end = std::min(mt + tile_m, M);
-                int64_t m_size = m_end - mt;
+                int64_t m_size = m_end - mt; (void)m_size;
                 Tensor A_tile = A.reshape({(int64_t)M, K}).slice(0, mt, m_end);
                 Tensor C_tile = C.reshape({(int64_t)M, N}).slice(0, mt, m_end);
                 math::gemm(alpha, A_tile, B, beta, C_tile);
@@ -380,7 +380,7 @@ public:
         int64_t start = rank_ * rows_per_device;
         int64_t end = std::min(start + rows_per_device, M);
         if (start >= M) return;
-        int64_t local_rows = end - start;
+        int64_t local_rows = end - start; (void)local_rows;
         Tensor A_local = A.reshape({(int64_t)M, K}).slice(0, start, end);
         Tensor C_local = C.reshape({(int64_t)M, N}).slice(0, start, end);
         local_backend.gemm(alpha, A_local, B, beta, C_local);

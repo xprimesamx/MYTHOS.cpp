@@ -1,0 +1,39 @@
+{
+    "configurations": [
+        {
+            "name": "Win32",
+            "includePath": [
+                "${workspaceFolder}/include",
+                "${workspaceFolder}/engines/inference",
+                "${workspaceFolder}/engines/trainer/dense",
+                "${workspaceFolder}/engines/trainer/moe",
+                "${workspaceFolder}/engines/trainer/moe/vision",
+                "${workspaceFolder}/engines/trainer/moe/audio",
+                "${workspaceFolder}/engines/trainer/moe/embeddings",
+                "${workspaceFolder}/engines/trainer/moe/image",
+                "${workspaceFolder}/engines/trainer/moe/ocr",
+                "${workspaceFolder}/engines/trainer/moe/text",
+                "${workspaceFolder}/engines/trainer/moe/video",
+                "${workspaceFolder}/engines/trainer/multimodel/text",
+                "${workspaceFolder}/engines/trainer/multimodel/image",
+                "${workspaceFolder}/engines/trainer/multimodel/audio",
+                "${workspaceFolder}/engines/trainer/multimodel/video",
+                "${workspaceFolder}/engines/trainer/multimodel/ocr",
+                "${workspaceFolder}/engines/trainer/multimodel/embeddings",
+                "${workspaceFolder}/engines/trainer/multimodel/vision",
+                "${workspaceFolder}/engines/OIL8"
+            ],
+            "defines": [
+                "OIL_AVX2",
+                "NOMINMAX",
+                "WIN32_LEAN_AND_MEAN",
+                "_CRT_SECURE_NO_WARNINGS"
+            ],
+            "cStandard": "c17",
+            "cppStandard": "c++20",
+            "intelliSenseMode": "windows-msvc-x64",
+            "compilerPath": "cl.exe"
+        }
+    ],
+    "version": 4
+}

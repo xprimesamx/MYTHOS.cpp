@@ -100,6 +100,7 @@ int main() {
         tokenizer.train(corpus, 32);
         auto ids = tokenizer.encode("hello world");
         for (int id : ids) {
+            (void)id;
             assert(id >= 0);
             assert(id < tokenizer.vocab_size());
         }

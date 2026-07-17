@@ -114,7 +114,7 @@ public:
         const Tensor& b = saved[1];
         // Flatten gradient to 2D {M, N} if higher-rank (to match forward output shape)
         int64_t M = a.dim(0);
-        int64_t K = a.dim(1);
+        int64_t K = a.dim(1); (void)K;
         int64_t N = b.dim(0);
         Tensor g = g_orig;
         if (g_orig.rank() > 2) {
@@ -282,9 +282,10 @@ public:
     }
 
 private:
-    int64_t head_dim_, seq_start_, seq_len_;
-    int64_t B_, H_, S_, D_;
+    int64_t head_dim_;
     Tensor cos_cached_, sin_cached_;
+    int64_t seq_start_, seq_len_;
+    int64_t B_, H_, S_, D_;
 };
 
 #if defined(OIL_AVX2) || defined(__AVX2__)

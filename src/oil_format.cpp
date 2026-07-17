@@ -167,7 +167,7 @@ public:
         size_ = ftell(f);
         fseek(f, 0, SEEK_SET);
         data_ = new uint8_t[size_];
-        fread(data_, 1, size_, f);
+        if (fread(data_, 1, size_, f) != size_) { /* read error */ }
         fclose(f);
         return true;
     }
@@ -427,10 +427,7 @@ Tensor OILReader::read_tensor(const std::string& name) const {
                 if (cb > 0) raw_pp += cb;
                 uint32_t ib; memcpy(&ib, raw_pp, sizeof(ib)); raw_pp += sizeof(ib);
                 block_len += sizeof(ib) + ib;
-                SHA256Hash block_hash = sha256(raw_start, block_len);
-                // Hash is computed but not compared (stored hash not available in this file version);
-                // In a future version, a hash map block_id->sha256 in the idx file enables fail-fast.
-                // For now this serves as a warm integrity check that can be logged.
+                SHA256Hash block_hash = sha256(raw_start, block_len); (void)block_hash;
 
                 BlockData bd = read_block((uint32_t)blk_id);
                 if (bd.format == Format::FP32 && bd.indices.size() >= bd.num_weights * 4) {

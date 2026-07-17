@@ -60,8 +60,8 @@ void FormatPlanner::compute_format_mix(int num_blocks, float target_bpw,
                                         int& oil8, int& oil4,
                                         int& ternary, int& binary) {
     const float bpw_oil8 = 8.0f;
-    const float bpw_oil4 = 4.0f;
-    const float bpw_ternary = 1.58f;
+    const float bpw_oil4 = 4.0f; (void)bpw_oil4;
+    const float bpw_ternary = 1.58f; (void)bpw_ternary;
     const float bpw_binary = 1.0f;
 
     if (target_bpw >= bpw_oil8) {

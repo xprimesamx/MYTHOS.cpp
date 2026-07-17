@@ -64,7 +64,7 @@ std::vector<QuantizeParams> quantize_activations(const Tensor& src, Tensor& dst)
     OIL_CHECK(src.rank() >= 2, "quantize_activations: src must have rank >= 2");
 
     int64_t batch = src.dim(0);
-    int64_t per_batch = src.numel() / batch;
+    int64_t per_batch = src.numel() / batch; (void)per_batch;
 
     std::vector<QuantizeParams> params(batch);
 

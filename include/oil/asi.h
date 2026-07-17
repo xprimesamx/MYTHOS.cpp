@@ -6,6 +6,8 @@
 #include <vector>
 #include <functional>
 #include <memory>
+#include <chrono>
+#include <fstream>
 
 namespace oil {
 namespace asi {
@@ -254,6 +256,78 @@ public:
     std::vector<Result> evaluate_all();
 private:
     Model* model_;
+};
+
+// ========================================================================
+// Self-Improving Flywheel + ASI Sandbox
+// ========================================================================
+
+struct SandboxResult {
+    bool compiled = false;
+    bool passed = false;
+    float score = 0.0f;
+    std::string stdout_capture;
+    std::string stderr_capture;
+    double runtime_ms = 0.0;
+    int exit_code = -1;
+};
+
+struct FlywheelIteration {
+    int iter = 0;
+    std::string task;
+    std::string solution;
+    bool compiled = false;
+    bool verified = false;
+    float delta = 0.0f;
+    bool applied = false;
+    bool rolled_back = false;
+    std::string file;
+    int line = 0;
+    std::string proof;
+    double runtime_ms = 0.0;
+};
+
+class Flywheel {
+public:
+    Flywheel(Model* model, Trainer* trainer, CodeGenSelfImprover* codegen = nullptr,
+             SelfVerifier* verifier = nullptr, CapabilityAmplifier* amplifier = nullptr,
+             SafetyGuardrails* safety = nullptr);
+
+    void run(int max_iters = 100);
+    const std::vector<FlywheelIteration>& get_history() const { return history_; }
+    int get_no_improvement_count() const { return no_improvement_count_; }
+    std::string get_log_path() const;
+
+private:
+    std::string self_play();
+    SandboxResult sandbox_compile_and_test(const std::string& code, const std::string& task);
+    float measure_improvement(const std::string& task, const std::string& solution);
+    bool apply_improvement(const std::string& original, const std::string& improved, const std::string& target_file);
+    bool rollback(const std::string& file_path, const std::string& backup_path);
+    void log_iteration(const FlywheelIteration& iter);
+    std::string generate_test_program(const std::string& code, const std::string& task);
+    std::string extract_proof(const std::string& solution);
+    bool run_with_timeout(const std::string& binary, double timeout_sec, std::string& stdout_out, std::string& stderr_out, int& exit_code);
+    std::string make_diff(const std::string& original, const std::string& improved);
+    bool check_convergence();
+    std::string sandbox_path() const;
+    int count_tests_passed(const std::string& stdout_str);
+    std::string generate_benchmark_harness(const std::string& code, const std::string& task, int n_iterations = 1000);
+    int calculate_cyclomatic_complexity(const std::string& code);
+    int measure_nesting_depth(const std::string& code);
+    float estimate_code_quality(const std::string& code);
+    bool sandbox_benchmark(const std::string& code, const std::string& task, double& ops_per_sec, double& avg_latency_ms);
+    std::string generate_multi_file_test(const std::vector<std::pair<std::string, std::string>>& files, const std::string& task);
+
+    Model* model_;
+    Trainer* trainer_;
+    CodeGenSelfImprover* codegen_;
+    SelfVerifier* verifier_;
+    CapabilityAmplifier* amplifier_;
+    SafetyGuardrails* safety_;
+    int no_improvement_count_ = 0;
+    int converged_count_ = 0;
+    std::vector<FlywheelIteration> history_;
 };
 
 } // namespace asi

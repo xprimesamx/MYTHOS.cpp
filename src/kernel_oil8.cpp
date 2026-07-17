@@ -9,7 +9,7 @@
 namespace oil {
 namespace kernel {
 
-static void oil8_gemm_scalar(const uint8_t* indices, const float* codebook,
+[[maybe_unused]] static void oil8_gemm_scalar(const uint8_t* indices, const float* codebook,
                               const float* activations, float* output,
                               int M, int N, int K) {
     for (int m = 0; m < M; m++) {

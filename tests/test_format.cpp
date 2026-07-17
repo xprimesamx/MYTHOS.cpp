@@ -70,7 +70,7 @@ int main() {
         oil::OILReader reader(tmp_path);
 
         // Verify header
-        auto& hdr = reader.header();
+        auto& hdr = reader.header(); (void)hdr;
         assert(memcmp(hdr.magic, "OIL1", 4) == 0);
         assert(hdr.version > 0);
 
@@ -117,7 +117,7 @@ int main() {
         assert(plan.achieved_bpw > 0.0f);
         assert(plan.target_bpw > 0.0f);
 
-        auto bpw_est = oil::FormatPlanner::estimate_bpw(plan);
+        auto bpw_est = oil::FormatPlanner::estimate_bpw(plan); (void)bpw_est;
         assert(bpw_est > 0.0f);
     }
 
@@ -134,7 +134,7 @@ int main() {
 
     // Test FormatBlockEntry packing
     {
-        oil::FormatBlockEntry e;
+        oil::FormatBlockEntry e; (void)e;
         e.block_id = 42;
         e.format = (uint8_t)oil::Format::OIL8;
         e.cb_bytes = 256 * 4;

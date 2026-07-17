@@ -13,6 +13,7 @@ int main() {
         auto a = oil::Tensor::arange(5);
         auto b = oil::Tensor::arange(5);
         float d = oil::math::dot(a, b);
+        (void)d;
         // 0*0 + 1*1 + 2*2 + 3*3 + 4*4 = 0+1+4+9+16 = 30
         assert(std::abs(d - 30.0f) < 1e-5f);
     }
@@ -30,14 +31,14 @@ int main() {
     {
         auto x = oil::Tensor::arange(4);
         // |x| = sqrt(0+1+4+9) = sqrt(14)
-        float n = oil::math::norm(x);
+        float n = oil::math::norm(x); (void)n;
         assert(std::abs(n - std::sqrt(14.0f)) < 1e-5f);
     }
 
     // Test asum
     {
         auto x = oil::Tensor::arange(5);
-        float s = oil::math::asum(x);
+        float s = oil::math::asum(x); (void)s;
         assert(std::abs(s - 10.0f) < 1e-5f);
     }
 
@@ -65,7 +66,7 @@ int main() {
         // C[2][0] = 5*7 + 6*10 = 95
         // C[2][1] = 5*8 + 6*11 = 106
         // C[2][2] = 5*9 + 6*12 = 117
-        float expected[] = {27,30,33,61,68,75,95,106,117};
+        float expected[] = {27,30,33,61,68,75,95,106,117}; (void)expected;
         for (int i = 0; i < 9; i++)
             assert(std::abs(C.data<float>()[i] - expected[i]) < 1e-5f);
     }
@@ -166,7 +167,7 @@ int main() {
         for (int64_t i = 0; i < D; i++)
             ss += (double)x.data<float>()[i] * x.data<float>()[i];
         ss /= D;
-        double inv = 1.0 / std::sqrt(ss + 1e-5);
+        double inv = 1.0 / std::sqrt(ss + 1e-5); (void)inv;
 
         for (int64_t i = 0; i < D; i++)
             assert(std::abs(y.data<float>()[i] - (float)((double)x.data<float>()[i] * inv)) < 1e-5f);

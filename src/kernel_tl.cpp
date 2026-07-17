@@ -14,7 +14,7 @@ void tl1_precompute_lut(const int8_t* activations, int8_t* lut,
                         int K, float scales) {
     (void)scales;
     int groups = K / 2;
-    int remaining = K % 2;
+    int remaining = K % 2; (void)remaining;
     for (int k = 0; k < groups; k++) {
         int8_t a0 = activations[k * 2];
         int8_t a1 = activations[k * 2 + 1];

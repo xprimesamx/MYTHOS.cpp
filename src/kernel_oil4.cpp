@@ -26,7 +26,7 @@ static float fp16_to_float(uint16_t h) {
     return result;
 }
 
-static void oil4_gemm_scalar(const uint8_t* packed_indices, const uint16_t* codebook,
+[[maybe_unused]] static void oil4_gemm_scalar(const uint8_t* packed_indices, const uint16_t* codebook,
                               const float* activations, float* output,
                               int M, int N, int K) {
     float f16_centroids[16];
@@ -58,7 +58,7 @@ static void oil4_gemm_avx2(const uint8_t* packed_indices, const uint16_t* codebo
     for (int i = 0; i < 16; i++)
         f16_centroids[i] = fp16_to_float(codebook[i]);
 
-    __m256 cb_full = _mm256_loadu_ps(f16_centroids);
+    __m256 cb_full = _mm256_loadu_ps(f16_centroids); (void)cb_full;
 
     for (int m = 0; m < M; m++) {
         for (int n = 0; n < N; n++) {

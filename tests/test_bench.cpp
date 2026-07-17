@@ -50,7 +50,7 @@ static void test_hardware_probe() {
 
 static void test_backend_creation() {
     printf("\n=== BACKEND CREATION ===\n");
-    HardwareProfile hw = probe_hardware();
+    HardwareProfile hw = probe_hardware(); (void)hw;
 
     // Try creating each available backend
     BackendType types[] = {

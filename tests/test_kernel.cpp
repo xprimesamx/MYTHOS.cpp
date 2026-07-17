@@ -24,7 +24,7 @@ static bool approx_equal(float a, float b, float eps = 1e-4f) {
     return std::abs(a - b) < eps;
 }
 
-static bool all_close(const float* a, const float* b, int64_t n, float eps = 1e-4f) {
+[[maybe_unused]] static bool all_close(const float* a, const float* b, int64_t n, float eps = 1e-4f) {
     for (int64_t i = 0; i < n; i++)
         if (!approx_equal(a[i], b[i], eps)) {
             std::cerr << "Mismatch at " << i << ": " << a[i] << " vs " << b[i] << std::endl;
