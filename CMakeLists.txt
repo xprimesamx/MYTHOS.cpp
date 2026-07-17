@@ -195,6 +195,9 @@ add_library(oil_production
 )
 target_include_directories(oil_production PUBLIC include)
 target_link_libraries(oil_production PUBLIC oil_model oil_inference oil_tokenizer)
+if(WIN32)
+  target_link_libraries(oil_production PUBLIC ws2_32)
+endif()
 
 # CUDA kernels (optional)
 find_package(CUDAToolkit QUIET)
