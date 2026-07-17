@@ -4,7 +4,9 @@
 #include <cstring>
 #include <cmath>
 #include <cstdint>
+#if defined(__x86_64__) || defined(_M_X64) || defined(__i386__) || defined(_M_IX86)
 #include <immintrin.h>
+#endif
 
 namespace oil {
 namespace kernel {
@@ -51,6 +53,7 @@ static float fp16_to_float(uint16_t h) {
     }
 }
 
+#if defined(__AVX2__)
 static void oil4_gemm_avx2(const uint8_t* packed_indices, const uint16_t* codebook,
                             const float* activations, float* output,
                             int M, int N, int K) {
@@ -109,6 +112,7 @@ static void oil4_gemm_avx2(const uint8_t* packed_indices, const uint16_t* codebo
         }
     }
 }
+#endif
 
 void oil4_gemm(const uint8_t* packed_indices, const uint16_t* codebook,
                const float* activations, float* output,
