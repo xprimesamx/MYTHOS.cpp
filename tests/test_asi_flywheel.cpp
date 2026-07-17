@@ -49,7 +49,11 @@ static void test_sandbox_compile_run() {
     auto tmp = fs::temp_directory_path() / "mythos_sandbox_test";
     fs::create_directories(tmp);
     std::string src = (tmp / "test_prog.cpp").string();
+#ifdef _WIN32
+    std::string exe = (tmp / "test_prog.exe").string();
+#else
     std::string exe = (tmp / "test_prog").string();
+#endif
 
     // Write a simple C++ program that prints PASS
     {
