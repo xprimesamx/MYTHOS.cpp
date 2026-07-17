@@ -235,9 +235,11 @@ void OILWriter::write_block(const BlockData& block) {
 size_t OILWriter::write_dedup(const uint8_t* data, size_t size) {
     if (!file_.is_open() || !data || size == 0) return (size_t)-1;
     SHA256Hash h = sha256(data, size);
+    static const char hexmap[] = "0123456789abcdef";
     char hex[65];
     for (int i = 0; i < 32; i++) {
-        std::sprintf(hex + i * 2, "%02x", h.bytes[i]);
+        hex[i*2]   = hexmap[(h.bytes[i] >> 4) & 0xf];
+        hex[i*2+1] = hexmap[h.bytes[i] & 0xf];
     }
     hex[64] = '\0';
     std::string key(hex);
