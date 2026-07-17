@@ -56,16 +56,7 @@ static inline float fp16_to_float(uint16_t h) {
     return result;
 }
 
-static void quantize_params_to_fp16(const std::vector<Tensor*>& params) {
-    for (auto* p : params) {
-        float* d = p->data<float>();
-        int64_t n = p->numel();
-        for (int64_t i = 0; i < n; i++) {
-            uint16_t f16 = float_to_fp16(d[i]);
-            d[i] = fp16_to_float(f16);
-        }
-    }
-}
+// quantize_params_to_fp16 removed (unused)
 
 static void collect_trainer_params(DenseModel* dm, std::vector<Tensor*>& params) {
     if (!dm) return;

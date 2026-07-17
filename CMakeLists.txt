@@ -276,6 +276,9 @@ if(OIL_BUILD_TESTS)
   
   # SHA256 hash indexing corrupt test
   add_oil_test(test_sha256_corrupt tests/test_sha256_corrupt.cpp oil_format)
+
+  # ASI flywheel / sandbox test
+  add_oil_test(test_asi_flywheel tests/test_asi_flywheel.cpp)
 endif()
 
 if(OIL_BUILD_BENCHMARKS)

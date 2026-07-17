@@ -46,7 +46,7 @@ void FormatPlanner::score_importance_fisher(const Tensor& weights,
         double score = 0;
         int64_t start = b * block_size;
         int64_t end = (std::min)(start + block_size, n);
-        for (int i = start; i < end; i++) {
+        for (int64_t i = start; i < end; i++) {
             float g = gd[i];
             score += (double)(g * g);
         }

@@ -1,8 +1,9 @@
 if(CMAKE_CXX_COMPILER_ID MATCHES "Clang")
   message(STATUS "COMPILER: Clang ${CMAKE_CXX_COMPILER_VERSION}")
 
-  add_compile_options(-Wall -Wextra -Wpedantic -Wno-unused-parameter -Wno-unused-variable -Wno-unsafe-buffer-usage
+  add_compile_options(-Wall -Wextra -Wpedantic -Wno-unused-parameter -Wno-unused-variable -Wno-unused-private-field -Wno-unused-function -Wno-unused-but-set-variable -Wno-unsafe-buffer-usage -Wno-c++98-compat -Wno-c++98-compat-pedantic -Wno-padded -Wno-double-promotion -Wno-implicit-int-float-conversion -Wno-implicit-float-conversion -Wno-sign-conversion -Wno-zero-as-null-pointer-constant -Wno-float-equal -Wno-switch-default -Wno-covered-switch-default -Wno-switch-enum -Wno-shadow -Wno-shadow-uncaptured-local -Wno-missing-prototypes -Wno-missing-variable-declarations -Wno-missing-field-initializers -Wno-exit-time-destructors -Wno-global-constructors -Wno-unused-template -Wno-unused-macros -Wno-unreachable-code-loop-increment -Wno-cast-align -Wno-cast-function-type-strict -Wno-shorten-64-to-32 -Wno-unique-object-duplication -Wno-nonportable-system-include-path -Wno-implicit-int-conversion -Wno-deprecated-copy-with-dtor -Wno-nrvo -Wno-cast-qual -Wno-reorder-ctor -Wno-language-extension-token -Wno-newline-eof -Wno-shadow-header -Wno-sign-compare -Wno-unknown-argument -Wno-unused-command-line-argument -Wno-uninitialized
     -D_FORTIFY_SOURCE=0 -Wno-old-style-cast -fno-stack-protector)
+  add_definitions(-D_CRT_SECURE_NO_WARNINGS)
 
   if(OIL_SANITIZE)
     add_compile_options(-fsanitize=address,undefined -fno-omit-frame-pointer)

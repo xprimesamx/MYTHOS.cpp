@@ -5,6 +5,8 @@
 #include <fstream>
 #include <sstream>
 #include <cstdio>
+#include <sys/stat.h>
+#include <filesystem>
 
 namespace oil {
 
@@ -381,6 +383,15 @@ void PagedKVCache1T::offload_to_disk(int layer, int64_t block_id) {
     if (blk.on_disk) return;
 
     std::string path = block_disk_path(layer, block_id);
+    size_t parent_end = path.find_last_of("/\\");
+    if (parent_end != std::string::npos) {
+        std::string dir = path.substr(0, parent_end);
+#ifdef _WIN32
+        std::filesystem::create_directories(dir);
+#else
+        mkdir(dir.c_str(), 0755);
+#endif
+    }
     std::ofstream ofs(path, std::ios::binary);
     if (!ofs) return;
 
@@ -411,6 +422,12 @@ void PagedKVCache1T::load_from_disk(int layer, int64_t block_id) const {
     auto& blk = it->second;
     if (!blk.on_disk) return;
 
+    int64_t per_block_floats = num_heads_ * block_size_ * head_dim_;
+    size_t block_bytes = (size_t)per_block_floats * 2 * sizeof(float);
+    while (current_memory_used_ + block_bytes > physical_memory_limit_) {
+        const_cast<PagedKVCache1T*>(this)->evict_lru(layer);
+    }
+
     std::ifstream ifs(blk.disk_file, std::ios::binary);
     if (!ifs) return;
 
@@ -424,8 +441,6 @@ void PagedKVCache1T::load_from_disk(int layer, int64_t block_id) const {
     ifs.close();
 
     blk.on_disk = false;
-    int64_t per_block_floats = num_heads_ * block_size_ * head_dim_;
-    size_t block_bytes = (size_t)per_block_floats * 2 * sizeof(float);
     current_memory_used_ += block_bytes;
     std::remove(blk.disk_file.c_str());
     blk.disk_file.clear();

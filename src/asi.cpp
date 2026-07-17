@@ -1534,21 +1534,7 @@ static std::string read_file_contents(const fs::path& path) {
                        std::istreambuf_iterator<char>());
 }
 
-static std::string escape_path(const std::string& p) {
-#ifdef _WIN32
-    return "\"" + p + "\"";
-#else
-    std::string escaped = p;
-    for (size_t i = 0; i < escaped.size(); i++) {
-        if (escaped[i] == ' ' || escaped[i] == '(' || escaped[i] == ')' ||
-            escaped[i] == '&' || escaped[i] == '|' || escaped[i] == ';') {
-            escaped.insert(escaped.begin() + i, '\\');
-            i++;
-        }
-    }
-    return escaped;
-#endif
-}
+
 
 // ========================================================================
 // Flywheel constructor
@@ -1902,6 +1888,7 @@ float Flywheel::estimate_code_quality(const std::string& code) {
         if (line.size() > 100) long_line_count++;
     }
 
+    (void)blank_lines;
     float density = total_lines > 0 ? (float)code_lines / (float)total_lines : 0;
     float comment_ratio = total_lines > 0 ? (float)comment_lines / (float)total_lines : 0;
 

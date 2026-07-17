@@ -88,7 +88,7 @@ private:
 
 class PagedKVCache1T {
 public:
-    static constexpr int64_t TABLE_ENTRIES = 256;
+    static constexpr int64_t TABLE_ENTRIES = 4096;
     static constexpr int64_t DEFAULT_BLOCK_SIZE = 16;
     static constexpr int64_t MIN_LOGICAL_TOKENS = (int64_t)1 << 40; // 1T
 

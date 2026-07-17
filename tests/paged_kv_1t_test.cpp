@@ -270,10 +270,10 @@ static void test_hierarchical_page_table() {
                           512ULL * 1024 * 1024, "");
 
     int64_t capacity = cache.max_logical_tokens_per_layer();
-    int64_t expected = 256 * 256 * 256 * block_size; // 256^3 * block_size
+    int64_t expected = PagedKVCache1T::TABLE_ENTRIES * PagedKVCache1T::TABLE_ENTRIES * PagedKVCache1T::TABLE_ENTRIES * block_size;
     printf("  Max logical tokens per layer: %lld (expected: %lld)\n",
            (long long)capacity, (long long)expected);
-    CHECK(capacity == expected, "hierarchical page table gives 256^3 * block_size tokens");
+    CHECK(capacity == expected, "hierarchical page table gives TABLE_ENTRIES^3 * block_size tokens");
     CHECK(capacity >= (int64_t)1 << 40, "capacity >= 1T (2^40)");
 
     Tensor k(Shape{1, num_heads, 1, head_dim});
