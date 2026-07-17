@@ -442,22 +442,22 @@ ComputeBackend* ComputeBackend::create(const BackendConfig& cfg) {
 // ========================================================================
 
 static inline void oil_cpuid(int info[4], int leaf) {
-#if defined(_MSC_VER)
+#if defined(_WIN32)
     __cpuid(info, leaf);
 #elif defined(__aarch64__) || defined(__arm__)
     (void)info; (void)leaf;
 #else
-    __cpuid(leaf, &info[0], &info[1], &info[2], &info[3]);
+    __cpuid(leaf, info[0], info[1], info[2], info[3]);
 #endif
 }
 
 static inline void oil_cpuidex(int info[4], int leaf, int sub) {
-#if defined(_MSC_VER)
+#if defined(_WIN32)
     __cpuidex(info, leaf, sub);
 #elif defined(__aarch64__) || defined(__arm__)
     (void)info; (void)leaf; (void)sub;
 #else
-    __cpuid_count(leaf, sub, &info[0], &info[1], &info[2], &info[3]);
+    __cpuid_count(leaf, sub, info[0], info[1], info[2], info[3]);
 #endif
 }
 
