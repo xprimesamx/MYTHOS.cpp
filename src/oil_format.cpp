@@ -16,6 +16,13 @@ namespace oil {
 
 namespace {
 
+// Disable MSVC /GS buffer security check for SHA-256 functions.
+// The large uint32_t w[64] (256 bytes) in sha256_block triggers a false-positive
+// stack buffer overrun detection (0xc0000409) under MSVC /O2 + /GS.
+#ifdef _MSC_VER
+#pragma optimize("gs", off)
+#endif
+
 struct SHA256Ctx {
     uint32_t state[8];
     uint64_t bitlen;
@@ -110,6 +117,10 @@ SHA256Hash sha256(const uint8_t* data, size_t len) {
     sha256_final(c, h.bytes);
     return h;
 }
+
+#ifdef _MSC_VER
+#pragma optimize("gs", on)
+#endif
 
 } // namespace
 
