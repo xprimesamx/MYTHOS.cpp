@@ -1,4 +1,4 @@
-# ⚡ MYTHOS.cpp — v0.1 Release
+# ⚡ MYTHOS.cpp — v0.1.01 Release
 
 > **M**ixed-format **Y**our-own **T**ensor **H**andcrafted **O**ptimized **S**ystem
 
@@ -8,7 +8,7 @@
 EVERYTHING IS OUR OWN — zero dependency, maximum control.
 ```
 
-### Build Status (v0.1)
+### Build Status (v0.1.01)
 
 | Platform | Compiler | Status |
 |----------|----------|--------|
