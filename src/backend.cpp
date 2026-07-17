@@ -21,6 +21,8 @@
 #include <unistd.h>
 #include <sys/sysctl.h>
 #include <TargetConditionals.h>
+#if defined(__x86_64__) || defined(__i386__)
+#include <cpuid.h>
 #endif
 
 namespace oil {
@@ -441,22 +443,28 @@ ComputeBackend* ComputeBackend::create(const BackendConfig& cfg) {
 static inline void oil_cpuid(int info[4], int leaf) {
 #if defined(_MSC_VER)
     __cpuid(info, leaf);
+#elif defined(__aarch64__) || defined(__arm__)
+    (void)info; (void)leaf;
 #else
-    __cpuid(leaf, info[0], info[1], info[2], info[3]);
+    __cpuid(leaf, &info[0], &info[1], &info[2], &info[3]);
 #endif
 }
 
 static inline void oil_cpuidex(int info[4], int leaf, int sub) {
 #if defined(_MSC_VER)
     __cpuidex(info, leaf, sub);
+#elif defined(__aarch64__) || defined(__arm__)
+    (void)info; (void)leaf; (void)sub;
 #else
-    __cpuid_count(leaf, sub, info[0], info[1], info[2], info[3]);
+    __cpuid_count(leaf, sub, &info[0], &info[1], &info[2], &info[3]);
 #endif
 }
 
 bool is_avx2_available() {
 #if defined(OIL_AVX2)
     return true;
+#elif defined(__aarch64__) || defined(__arm__)
+    return false;
 #else
     int cpu_info[4] = {0};
     oil_cpuid(cpu_info, 0);
@@ -472,6 +480,8 @@ bool is_avx2_available() {
 bool is_avx512_available() {
 #if defined(OIL_AVX512)
     return true;
+#elif defined(__aarch64__) || defined(__arm__)
+    return false;
 #else
     int cpu_info[4] = {0};
     oil_cpuid(cpu_info, 0);

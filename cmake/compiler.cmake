@@ -2,7 +2,7 @@ if(CMAKE_CXX_COMPILER_ID MATCHES "Clang")
   message(STATUS "COMPILER: Clang ${CMAKE_CXX_COMPILER_VERSION}")
 
   add_compile_options(-Wall -Wextra -Wpedantic -Wno-unused-parameter -Wno-unused-variable -Wno-unsafe-buffer-usage
-    -D_FORTIFY_SOURCE=0 -Wno-old-style-cast -fno-stack-protector /GS-)
+    -D_FORTIFY_SOURCE=0 -Wno-old-style-cast -fno-stack-protector)
 
   if(OIL_SANITIZE)
     add_compile_options(-fsanitize=address,undefined -fno-omit-frame-pointer)
